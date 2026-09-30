@@ -45,10 +45,15 @@ final class FloatingPanel: NSPanel {
 
     func resizeWidget(to height: CGFloat) {
         var frame = self.frame
-        let heightChange = height - frame.height
-        guard abs(heightChange) > 0.5 else { return }
-        frame.origin.y -= heightChange
+        guard abs(height - frame.height) > 0.5 else { return }
+        let centerY = frame.midY
         frame.size.height = height
+        frame.origin.y = centerY - height / 2
+        if let visibleFrame = (screen ?? NSScreen.main)?.visibleFrame {
+            let highestVisibleOrigin = max(visibleFrame.minY, visibleFrame.maxY - frame.height)
+            frame.origin.y = min(max(frame.origin.y, visibleFrame.minY), highestVisibleOrigin)
+        }
         setFrame(frame, display: true, animate: true)
+        makeKeyAndOrderFront(nil)
     }
 }
