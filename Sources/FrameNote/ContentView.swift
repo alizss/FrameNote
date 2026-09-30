@@ -90,10 +90,10 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain).help("Collapse to small widget")
             }
-            Button { NSApp.terminate(nil) } label: {
+            Button { (NSApp.delegate as? FrameNoteAppDelegate)?.hideWidget(nil) } label: {
                 Image(systemName: "xmark").frame(width: 22, height: 24)
             }
-            .buttonStyle(.plain).foregroundStyle(.secondary).help("Quit FrameNote")
+            .buttonStyle(.plain).foregroundStyle(.secondary).help("Hide widget — reopen from the menu bar")
         }
         .frame(height: 26)
     }

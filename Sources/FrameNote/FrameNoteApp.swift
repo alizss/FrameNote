@@ -5,6 +5,7 @@ import SwiftUI
 @main
 final class FrameNoteAppDelegate: NSObject, NSApplicationDelegate {
     private var panel: FloatingPanel?
+    private var statusItem: NSStatusItem?
 
     static func main() {
         let application = NSApplication.shared
@@ -38,6 +39,60 @@ final class FrameNoteAppDelegate: NSObject, NSApplicationDelegate {
         panel.center()
         panel.makeKeyAndOrderFront(nil)
         self.panel = panel
+        installMenuBarItem()
+    }
+
+    private func installMenuBarItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        if let button = item.button {
+            let image = NSImage(systemSymbolName: "viewfinder", accessibilityDescription: "FrameNote")
+            image?.isTemplate = true
+            image?.size = NSSize(width: 18, height: 18)
+            button.image = image
+            button.toolTip = "FrameNote — click to show or hide"
+            button.setAccessibilityLabel("FrameNote")
+            button.target = self
+            button.action = #selector(statusItemClicked(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        }
+        item.autosaveName = "FrameNote"
+        statusItem = item
+    }
+
+    @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
+        if let event = NSApp.currentEvent, event.type == .rightMouseUp {
+            let menu = NSMenu()
+            let visible = panel?.isVisible == true
+            let toggle = NSMenuItem(title: visible ? "Hide FrameNote" : "Show FrameNote",
+                                    action: visible ? #selector(hideWidget(_:)) : #selector(showWidget(_:)),
+                                    keyEquivalent: "")
+            toggle.target = self
+            menu.addItem(toggle)
+            menu.addItem(.separator())
+            let quit = NSMenuItem(title: "Quit FrameNote", action: #selector(NSApplication.terminate(_:)),
+                                  keyEquivalent: "q")
+            quit.target = NSApp
+            menu.addItem(quit)
+            NSMenu.popUpContextMenu(menu, with: event, for: sender)
+        } else if panel?.isVisible == true {
+            hideWidget(nil)
+        } else {
+            showWidget(nil)
+        }
+    }
+
+    @objc func showWidget(_ sender: Any?) {
+        NSApp.activate()
+        panel?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc func hideWidget(_ sender: Any?) {
+        panel?.orderOut(nil)
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showWidget(nil)
+        return true
     }
 
     // AppKit excludes NSPanel from its last-window count. ScreenCaptureKit's

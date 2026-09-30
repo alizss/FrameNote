@@ -18,6 +18,8 @@ open ~/Applications/FrameNote.app
 
 Capture controls stay in a small floating widget. Stop opens a larger review in the same floating window: drag an edge to resize it, use the magnifiers to zoom, and type beside the image in Comments. Drag the header to move the window. The collapse button returns to the small widget without losing the current review.
 
+FrameNote also lives in the macOS menu bar. Click its viewfinder icon to show or hide the widget. The widget's × button hides it and keeps the current review in memory; right-click the menu-bar icon for **Quit FrameNote**.
+
 The tools are:
 
 - **Comment:** click an element and type into the focused comment field.
