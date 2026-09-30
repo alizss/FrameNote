@@ -2,6 +2,7 @@ import AppKit
 import AVKit
 import FrameNoteCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @StateObject private var store = ReviewStore()
@@ -9,29 +10,30 @@ struct ContentView: View {
     var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
-                HStack(spacing: 10) {
-                    Picker("Tool", selection: $store.tool) {
-                        ForEach(MarkKind.allCases) { kind in
-                            Label(kind.rawValue, systemImage: symbol(for: kind)).tag(kind)
+                if hasReviewContent {
+                    HStack(spacing: 10) {
+                        Picker("Tool", selection: $store.tool) {
+                            ForEach(MarkKind.allCases) { kind in
+                                Label(kind.rawValue, systemImage: symbol(for: kind)).tag(kind)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 190)
+                        Spacer()
+                        if store.isRecording {
+                            Label("Recording", systemImage: "record.circle.fill")
+                                .foregroundStyle(.red)
+                                .font(.callout.weight(.semibold))
+                        } else if store.reference != nil {
+                            Toggle("Compare before / after", isOn: $store.compare)
+                                .toggleStyle(.switch)
+                                .fixedSize()
                         }
                     }
-                    .pickerStyle(.menu)
-                    .frame(width: 190)
-                    .disabled(store.screenshot == nil && store.videoURL == nil)
-                    Spacer()
-                    if store.isRecording {
-                        Label("Recording", systemImage: "record.circle.fill")
-                            .foregroundStyle(.red)
-                            .font(.callout.weight(.semibold))
-                    } else if store.reference != nil {
-                        Toggle("Compare before / after", isOn: $store.compare)
-                            .toggleStyle(.switch)
-                            .fixedSize()
-                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    Divider()
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                Divider()
 
                 if let videoURL = store.videoURL, let player = store.player {
                     ReviewCanvas(
@@ -55,51 +57,59 @@ struct ContentView: View {
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if store.isRecording {
-                    VStack(spacing: 12) {
-                        Image(systemName: "record.circle.fill").font(.system(size: 48)).foregroundStyle(.red)
-                        Text("Recording your screen").font(.title2.weight(.semibold))
-                        Text("FrameNote’s controls are excluded. Return here and click Stop when you’re done.")
-                            .multilineTextAlignment(.center).foregroundStyle(.secondary).frame(maxWidth: 420)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    recordingState
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     emptyState.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
 
-                Divider()
-                HStack(spacing: 10) {
+                if hasReviewContent {
+                    Divider()
+                    HStack(spacing: 10) {
+                        Text(store.status)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                        Spacer()
+                        if store.lastExport != nil {
+                            Button("Copy for agent", systemImage: "document.on.document") { store.copyForAgent() }
+                            Button("Show files") { store.revealExport() }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 9)
+                } else if store.status != "Choose a screenshot or capture a window to start." && !store.isRecording {
                     Text(store.status)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                    Spacer()
-                    if store.lastExport != nil {
-                        Button("Copy for agent", systemImage: "document.on.document") { store.copyForAgent() }
-                        Button("Show files") { store.revealExport() }
-                    }
+                        .padding(.bottom, 10)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 9)
             }
-            Divider()
-            inspector.frame(width: 320)
+            if hasReviewContent {
+                Divider()
+                inspector.frame(width: 320)
+            }
         }
+        .frame(minWidth: hasReviewContent ? 900 : 600, minHeight: hasReviewContent ? 620 : 460)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                Button(store.isRecording ? "Stop" : "Record", systemImage: store.isRecording ? "stop.fill" : "record.circle") {
-                    store.toggleRecording()
+                if hasReviewContent {
+                    Button("Record", systemImage: "record.circle") { store.toggleRecording() }
+                        .disabled(store.isCapturing)
+                    Menu("Open", systemImage: "plus") {
+                        Button("Capture a window…", systemImage: "camera.viewfinder") { store.captureWindow() }
+                        Button("Open an image…", systemImage: "photo") { store.importScreenshot() }
+                        Button("Open a recording…", systemImage: "film") { store.importVideo() }
+                    }
+                    Button("Share review", systemImage: "square.and.arrow.up") { store.export() }
                 }
-                .tint(store.isRecording ? .red : nil)
-                .disabled(store.isCapturing)
-                Menu("Open", systemImage: "plus") {
-                    Button("Capture a window…", systemImage: "camera.viewfinder") { store.captureWindow() }
-                    Button("Open an image…", systemImage: "photo") { store.importScreenshot() }
-                    Button("Open a recording…", systemImage: "film") { store.importVideo() }
-                }
-                Button("Share review", systemImage: "square.and.arrow.up") { store.export() }
-                    .disabled(store.screenshot == nil && store.videoURL == nil)
             }
         }
+        .preferredColorScheme(.light)
+    }
+
+    private var hasReviewContent: Bool {
+        store.screenshot != nil || store.videoURL != nil
     }
 
     private var timeline: some View {
@@ -149,22 +159,68 @@ struct ContentView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "record.circle").font(.system(size: 46)).foregroundStyle(.tint)
-            Text("Show the issue. Point to the fix.").font(.title2.weight(.semibold))
-            Text("Record a UI interaction, pause where it goes wrong, then pin a comment or mark the spacing.")
-                .multilineTextAlignment(.center).foregroundStyle(.secondary).frame(maxWidth: 430)
-            HStack(spacing: 10) {
-                Button("Record screen", systemImage: "record.circle") { store.toggleRecording() }
-                    .buttonStyle(.borderedProminent)
-                Button("Capture a window", systemImage: "camera.viewfinder") { store.captureWindow() }
-                Button("Open an image…", systemImage: "photo") {
-                    store.importScreenshot()
-                }
-                Button("Open a clip…", systemImage: "film") { store.importVideo() }
+        VStack(spacing: 16) {
+            Image(systemName: "record.circle")
+                .font(.system(size: 36, weight: .regular))
+                .foregroundStyle(.tint)
+            Text("Record a UI issue")
+                .font(.system(size: 26, weight: .semibold))
+            Text("Pause where it feels wrong. Add a pin, guide, or measurement.")
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+            Button("Record screen", systemImage: "record.circle") { store.toggleRecording() }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(store.isCapturing)
+                .padding(.top, 3)
+            HStack(spacing: 18) {
+                Button("Capture one window") { store.captureWindow() }
+                    .disabled(store.isCapturing)
+                Text("or").foregroundStyle(.tertiary)
+                Button("Open screenshot or clip…") { importMedia() }
             }
+            .buttonStyle(.link)
+            .font(.callout)
+            Text("Nothing is uploaded unless you share it.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .padding(.top, 2)
         }
-        .padding(28)
+        .padding(24)
+    }
+
+    private var recordingState: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "record.circle.fill")
+                .font(.system(size: 42))
+                .foregroundStyle(.red)
+            Text("Recording screen")
+                .font(.title2.weight(.semibold))
+            Text("Switch to the app you’re reviewing. Return here when you’re ready to stop.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 420)
+            Button("Stop recording", systemImage: "stop.fill") { store.toggleRecording() }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .controlSize(.large)
+                .disabled(store.isCapturing)
+        }
+        .padding(24)
+    }
+
+    private func importMedia() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image, .movie]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        if UTType(filenameExtension: url.pathExtension)?.conforms(to: .movie) == true {
+            store.openVideo(at: url)
+        } else {
+            store.openImage(at: url)
+        }
     }
 
     private var canvasMarks: [ReviewMark] {

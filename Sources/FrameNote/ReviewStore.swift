@@ -43,12 +43,17 @@ final class ReviewStore: ObservableObject {
 
     func importScreenshot() {
         guard let url = chooseImage() else { return }
+        openImage(at: url)
+    }
+
+    func openImage(at url: URL) {
         guard let image = NSImage(contentsOf: url) else {
             status = "Could not read that image. Choose a PNG or JPEG."
             return
         }
         screenshot = image
         clearVideo()
+        reference = nil
         marks = []
         lastExport = nil
         compare = false
@@ -60,6 +65,10 @@ final class ReviewStore: ObservableObject {
         panel.allowedContentTypes = [.movie]
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        openVideo(at: url)
+    }
+
+    func openVideo(at url: URL) {
         loadVideo(url)
         screenshot = nil
         reference = nil
