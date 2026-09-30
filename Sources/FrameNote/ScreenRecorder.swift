@@ -60,6 +60,7 @@ private enum RecorderError: LocalizedError {
     case notRecording
     case noFrames
     case screenRecordingPermission
+    case recordingOutputUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -67,38 +68,53 @@ private enum RecorderError: LocalizedError {
         case .notRecording: "There is no active recording."
         case .noFrames: "No video frames were recorded. Try again after granting Screen Recording permission."
         case .screenRecordingPermission: "Turn on FrameNote in Privacy & Security → Screen & System Audio Recording, then reopen it."
+        case .recordingOutputUnavailable: "macOS could not prepare a video file for recording. Restart FrameNote and try again."
         }
     }
 }
 
 private final class ScreenRecordingSession: NSObject, SCStreamOutput, @unchecked Sendable {
     private let outputURL: URL
-    private let writer: AVAssetWriter
-    private let input: AVAssetWriterInput
     private let stream: SCStream
+    private var writer: AVAssetWriter?
+    private var input: AVAssetWriterInput?
+    // Retain the native output through finalization. NSObject keeps this property
+    // available on macOS 14, where ScreenCaptureKit's recording-output API is absent.
+    private var nativeOutput: NSObject?
+    private var nativeDelegate: NSObject?
     private let queue = DispatchQueue(label: "dev.framenote.recorder.frames")
     private var didStartSession = false
     private var captureError: Error?
 
     init(filter: SCContentFilter, configuration: SCStreamConfiguration, outputURL: URL) throws {
         self.outputURL = outputURL
-        writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
-        input = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: configuration.width,
-            AVVideoHeightKey: configuration.height,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: min(18_000_000, max(6_000_000, configuration.width * configuration.height * 2)),
-                AVVideoExpectedSourceFrameRateKey: 30,
-                AVVideoMaxKeyFrameIntervalKey: 60,
-            ],
-        ])
-        input.expectsMediaDataInRealTime = true
-        guard writer.canAdd(input) else { throw RecorderError.noFrames }
-        writer.add(input)
         stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
         super.init()
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+
+        if #available(macOS 15.0, *) {
+            let outputConfiguration = SCRecordingOutputConfiguration()
+            outputConfiguration.outputURL = outputURL
+            outputConfiguration.outputFileType = .mov
+            outputConfiguration.videoCodecType = AVVideoCodecType.h264
+            let delegate = NativeRecordingDelegate()
+            let output = SCRecordingOutput(configuration: outputConfiguration, delegate: delegate)
+            try stream.addRecordingOutput(output)
+            nativeOutput = output
+            nativeDelegate = delegate
+        } else {
+            let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
+            let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+                AVVideoCodecKey: AVVideoCodecType.h264,
+                AVVideoWidthKey: configuration.width,
+                AVVideoHeightKey: configuration.height,
+            ])
+            input.expectsMediaDataInRealTime = true
+            guard writer.canAdd(input) else { throw RecorderError.noFrames }
+            writer.add(input)
+            self.writer = writer
+            self.input = input
+            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+        }
     }
 
     func start() async throws {
@@ -109,9 +125,33 @@ private final class ScreenRecordingSession: NSObject, SCStreamOutput, @unchecked
         do {
             try await stream.stopCapture()
         } catch {
-            writer.cancelWriting()
+            writer?.cancelWriting()
             try? FileManager.default.removeItem(at: outputURL)
             throw error
+        }
+
+        if #available(macOS 15.0, *), nativeOutput != nil {
+            do {
+                // stopCapture stops the native recording output; wait for its
+                // completion callback before handing the file to AVPlayer.
+                guard let delegate = nativeDelegate as? NativeRecordingDelegate else {
+                    throw RecorderError.recordingOutputUnavailable
+                }
+                try await delegate.waitForFinalization()
+                let attributes = try FileManager.default.attributesOfItem(atPath: outputURL.path)
+                guard (attributes[.size] as? NSNumber)?.intValue ?? 0 > 0 else {
+                    throw RecorderError.noFrames
+                }
+                return outputURL
+            } catch {
+                try? FileManager.default.removeItem(at: outputURL)
+                throw error
+            }
+        }
+
+        guard let writer, let input else {
+            try? FileManager.default.removeItem(at: outputURL)
+            throw RecorderError.recordingOutputUnavailable
         }
         return try await withCheckedThrowingContinuation { continuation in
             queue.async { [self] in
@@ -140,6 +180,7 @@ private final class ScreenRecordingSession: NSObject, SCStreamOutput, @unchecked
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard let writer, let input else { return }
         guard type == .screen, CMSampleBufferIsValid(sampleBuffer), CMSampleBufferDataIsReady(sampleBuffer) else { return }
         if !didStartSession {
             guard writer.startWriting() else {
@@ -152,5 +193,48 @@ private final class ScreenRecordingSession: NSObject, SCStreamOutput, @unchecked
         if input.isReadyForMoreMediaData && !input.append(sampleBuffer) {
             captureError = writer.error ?? RecorderError.noFrames
         }
+    }
+}
+
+@available(macOS 15.0, *)
+private final class NativeRecordingDelegate: NSObject, SCRecordingOutputDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<Void, Error>?
+    private var continuation: CheckedContinuation<Void, Error>?
+
+    func recordingOutputDidStartRecording(_ recordingOutput: SCRecordingOutput) {}
+
+    func recordingOutput(_ recordingOutput: SCRecordingOutput, didFailWithError error: Error) {
+        complete(.failure(error))
+    }
+
+    func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) {
+        complete(.success(()))
+    }
+
+    func waitForFinalization() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            lock.lock()
+            if let result {
+                lock.unlock()
+                continuation.resume(with: result)
+            } else {
+                self.continuation = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    private func complete(_ result: Result<Void, Error>) {
+        lock.lock()
+        guard self.result == nil else {
+            lock.unlock()
+            return
+        }
+        self.result = result
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
     }
 }
