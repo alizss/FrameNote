@@ -48,7 +48,7 @@ swift test --scratch-path /private/tmp/framenote-spm -j 1
 ./build.sh
 ```
 
-The app uses SwiftUI, AppKit, AVFoundation, and ScreenCaptureKit with no third-party packages. `build.sh` installs an ad-hoc signed app at `~/Applications/FrameNote.app` and links it as `FrameNote.app` in the repository root. The source project lives in this repository; the runnable app lives outside the synced Documents folder because Finder metadata there can invalidate macOS code signing. The build uses a temporary directory for the same reason.
+The app uses SwiftUI, AppKit, AVFoundation, and ScreenCaptureKit with no third-party packages. `build.sh` installs the app at `~/Applications/FrameNote.app` and links it as `FrameNote.app` in the repository root. When an Apple Development signing identity is available, the build uses it so macOS can keep Screen Recording consent across rebuilds; set `FRAMENOTE_SIGNING_IDENTITY` to select a specific identity. Without one, it falls back to ad-hoc signing, which may cause macOS to ask for Screen Recording permission again after rebuilds. The source project lives in this repository; the runnable app lives outside the synced Documents folder because Finder metadata there can invalidate macOS code signing. The build uses a temporary directory for the same reason.
 
 ## License
 

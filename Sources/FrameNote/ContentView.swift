@@ -6,209 +6,273 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @StateObject private var store = ReviewStore()
+    @FocusState private var focusedMark: UUID?
+
+    private var hasReviewContent: Bool { store.screenshot != nil || store.videoURL != nil }
+    private var widgetHeight: CGFloat {
+        if store.isRecording { return 154 }
+        if store.videoURL != nil { return 570 }
+        if store.screenshot != nil { return 540 }
+        return 154
+    }
 
     var body: some View {
-        HStack(spacing: 0) {
-            VStack(spacing: 0) {
-                if hasReviewContent {
-                    HStack(spacing: 10) {
-                        Picker("Tool", selection: $store.tool) {
-                            ForEach(MarkKind.allCases) { kind in
-                                Label(kind.rawValue, systemImage: symbol(for: kind)).tag(kind)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .frame(width: 190)
-                        Spacer()
-                        if store.isRecording {
-                            Label("Recording", systemImage: "record.circle.fill")
-                                .foregroundStyle(.red)
-                                .font(.callout.weight(.semibold))
-                        } else if store.reference != nil {
-                            Toggle("Compare before / after", isOn: $store.compare)
-                                .toggleStyle(.switch)
-                                .fixedSize()
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    Divider()
-                }
-
-                if let videoURL = store.videoURL, let player = store.player {
-                    ReviewCanvas(
-                        screenshot: nil, player: player, aspect: store.videoSize,
-                        marks: canvasMarks, tool: store.tool, currentTime: store.currentTime,
-                        pixelSize: (Int(store.videoSize.width), Int(store.videoSize.height)),
-                        onMark: store.addMark
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    timeline
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .onChange(of: videoURL) { _, _ in store.seek(to: 0) }
-                } else if let screenshot = store.screenshot {
-                    ReviewCanvas(
-                        screenshot: screenshot, player: nil, aspect: screenshot.size,
-                        marks: canvasMarks, tool: store.tool, currentTime: nil,
-                        pixelSize: imagePixelSize(screenshot), onMark: store.addMark,
-                        reference: store.reference, compare: store.compare,
-                        comparisonFraction: store.comparisonFraction
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if store.isRecording {
-                    recordingState
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    emptyState.frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-
-                if hasReviewContent {
-                    Divider()
-                    HStack(spacing: 10) {
-                        Text(store.status)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                        Spacer()
-                        if store.lastExport != nil {
-                            Button("Copy for agent", systemImage: "document.on.document") { store.copyForAgent() }
-                            Button("Show files") { store.revealExport() }
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 9)
-                } else if store.status != "Choose a screenshot or capture a window to start." && !store.isRecording {
-                    Text(store.status)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.bottom, 10)
-                }
-            }
-            if hasReviewContent {
-                Divider()
-                inspector.frame(width: 320)
+        VStack(alignment: .leading, spacing: 11) {
+            header
+            if store.isRecording {
+                recordingControls
+            } else if let videoURL = store.videoURL, let player = store.player {
+                videoReview(videoURL: videoURL, player: player)
+            } else if let screenshot = store.screenshot {
+                imageReview(screenshot)
+            } else {
+                idleControls
             }
         }
-        .frame(minWidth: hasReviewContent ? 900 : 600, minHeight: hasReviewContent ? 620 : 460)
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                if hasReviewContent {
-                    Button("Record", systemImage: "record.circle") { store.toggleRecording() }
-                        .disabled(store.isCapturing)
-                    Menu("Open", systemImage: "plus") {
-                        Button("Capture a window…", systemImage: "camera.viewfinder") { store.captureWindow() }
-                        Button("Open an image…", systemImage: "photo") { store.importScreenshot() }
-                        Button("Open a recording…", systemImage: "film") { store.importVideo() }
-                    }
-                    Button("Share review", systemImage: "square.and.arrow.up") { store.export() }
-                }
-            }
-        }
+        .padding(13)
+        .frame(width: 360, height: widgetHeight, alignment: .top)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.primary.opacity(0.08), lineWidth: 1))
         .preferredColorScheme(.light)
+        .animation(.easeInOut(duration: 0.18), value: widgetHeight)
     }
 
-    private var hasReviewContent: Bool {
-        store.screenshot != nil || store.videoURL != nil
-    }
-
-    private var timeline: some View {
-        VStack(spacing: 7) {
-            HStack(spacing: 10) {
-                Button {
-                    if store.player?.rate == 0 { store.player?.play() } else { store.player?.pause() }
+    private var header: some View {
+        HStack(spacing: 7) {
+            Image(systemName: store.isRecording ? "record.circle.fill" : "viewfinder")
+                .foregroundStyle(store.isRecording ? Color.red : Color.accentColor)
+            Text("FrameNote").font(.headline)
+            Spacer()
+            if hasReviewContent && !store.isRecording {
+                Menu {
+                    Button("Record new clip", systemImage: "record.circle") { store.toggleRecording() }
+                    Button("Capture a window…", systemImage: "macwindow") { store.captureWindow() }
+                    Button("Open screenshot or clip…", systemImage: "folder") { importMedia() }
+                    Button("Add before image…", systemImage: "rectangle.split.2x1") { store.importReference() }
+                        .disabled(!hasReviewContent)
+                    if store.lastExport != nil {
+                        Divider()
+                        Button("Copy for agent", systemImage: "document.on.document") { store.copyForAgent() }
+                        Button("Show exported files", systemImage: "folder") { store.revealExport() }
+                    }
                 } label: {
-                    Image(systemName: store.player?.rate == 0 ? "play.fill" : "pause.fill")
+                    Image(systemName: "ellipsis")
+                        .frame(width: 26, height: 22)
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.bordered)
-                .accessibilityLabel(store.player?.rate == 0 ? "Play" : "Pause")
-                Slider(value: Binding(get: { store.currentTime }, set: { store.seek(to: $0) }),
-                       in: 0...max(store.duration, 0.01))
-                    .disabled(store.duration <= 0)
-                Text("\(timeLabel(store.currentTime)) / \(timeLabel(store.duration))")
-                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                    .frame(minWidth: 112, alignment: .trailing)
-                Button {
-                    store.toggleLoop()
-                } label: {
-                    Label(store.loopEnabled ? "Loop on" : "Loop 3s", systemImage: "repeat")
-                }
-                .buttonStyle(.bordered)
-                .tint(store.loopEnabled ? .accentColor : .secondary)
-                .disabled(store.duration <= 0)
-                .help("Repeat the three seconds around the playhead")
+                .menuStyle(.borderlessButton)
+                .help("More actions")
             }
-            if !store.marks.isEmpty {
-                HStack(spacing: 5) {
-                    ForEach(Array(store.marks.enumerated()), id: \.element.id) { index, mark in
-                        if let time = mark.time {
-                            Button("\(index + 1) · \(timeLabel(time))") { store.seek(to: time) }
-                                .buttonStyle(.link)
-                                .font(.caption)
+            Button { NSApp.keyWindow?.close() } label: {
+                Image(systemName: "xmark")
+                    .font(.caption.weight(.semibold))
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Close FrameNote")
+        }
+        .frame(height: 22)
+    }
+
+    private var idleControls: some View {
+        VStack(spacing: 9) {
+            Button { store.toggleRecording() } label: {
+                Label("Record screen", systemImage: "record.circle.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+            .controlSize(.large)
+            .disabled(store.isCapturing)
+
+            HStack(spacing: 0) {
+                Button { store.captureWindow() } label: {
+                    Label("Capture", systemImage: "macwindow")
+                }
+                .help("Capture one window")
+                .disabled(store.isCapturing)
+                Spacer()
+                Button { importMedia() } label: {
+                    Label("Open", systemImage: "folder")
+                }
+                .help("Open a screenshot or clip")
+            }
+            .buttonStyle(.borderless)
+            .font(.callout)
+
+            if store.status != "Choose a screenshot or capture a window to start." {
+                Text(store.status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            } else {
+                Text("Always on top · drag anywhere to move")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private var recordingControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Circle().fill(.red).frame(width: 9, height: 9)
+                Text("Recording").font(.subheadline.weight(.semibold))
+                Spacer()
+                Button("Stop", systemImage: "stop.fill") { store.toggleRecording() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .disabled(store.isCapturing)
+            }
+            Text("Move this panel out of the way. It won’t appear in the recording.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(.top, 3)
+    }
+
+    private func videoReview(videoURL: URL, player: AVPlayer) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ReviewCanvas(
+                screenshot: nil, player: player, aspect: store.videoSize,
+                marks: canvasMarks, tool: store.tool, currentTime: store.currentTime,
+                pixelSize: (Int(store.videoSize.width), Int(store.videoSize.height)),
+                onMark: addMark, reference: store.reference,
+                compare: store.compare, comparisonFraction: store.comparisonFraction
+            )
+            .frame(height: 184)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .onChange(of: videoURL) { _, _ in store.seek(to: 0) }
+
+            playbackControls(player)
+            if store.compare, store.reference != nil {
+                Slider(value: $store.comparisonFraction, in: 0...1)
+            }
+            annotationTools
+            feedbackList(imageSize: (Int(store.videoSize.width), Int(store.videoSize.height)))
+            shareControls
+        }
+    }
+
+    private func imageReview(_ screenshot: NSImage) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ReviewCanvas(
+                screenshot: screenshot, player: nil, aspect: screenshot.size,
+                marks: canvasMarks, tool: store.tool, currentTime: nil,
+                pixelSize: imagePixelSize(screenshot), onMark: addMark,
+                reference: store.reference, compare: store.compare,
+                comparisonFraction: store.comparisonFraction
+            )
+            .frame(height: 205)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+
+            if store.compare, store.reference != nil {
+                Slider(value: $store.comparisonFraction, in: 0...1)
+            }
+            annotationTools
+            feedbackList(imageSize: imagePixelSize(screenshot))
+            shareControls
+        }
+    }
+
+    private func playbackControls(_ player: AVPlayer) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                if player.rate == 0 { player.play() } else { player.pause() }
+            } label: {
+                Image(systemName: player.rate == 0 ? "play.fill" : "pause.fill")
+                    .frame(width: 22)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(player.rate == 0 ? "Play" : "Pause")
+            Slider(value: Binding(get: { store.currentTime }, set: { store.seek(to: $0) }),
+                   in: 0...max(store.duration, 0.01))
+                .disabled(store.duration <= 0)
+            Text("\(timeLabel(store.currentTime)) / \(timeLabel(store.duration))")
+                .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            Button { store.toggleLoop() } label: {
+                Image(systemName: "repeat")
+                    .foregroundStyle(store.loopEnabled ? Color.accentColor : Color.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Loop 3 seconds around this moment")
+            .disabled(store.duration <= 0)
+        }
+        .frame(height: 24)
+    }
+
+    private var annotationTools: some View {
+        HStack(spacing: 8) {
+            Picker("Mark", selection: $store.tool) {
+                ForEach(MarkKind.allCases) { kind in
+                    Label(kind.rawValue, systemImage: symbol(for: kind)).tag(kind)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+            if store.reference != nil {
+                Button(store.compare ? "Done" : "Compare") { store.compare.toggle() }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+            }
+            Spacer(minLength: 0)
+        }
+        .overlay(alignment: .bottomLeading) {
+            Text(instruction(for: store.tool))
+                .font(.caption2).foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.tail)
+                .offset(y: 14)
+        }
+        .padding(.bottom, 12)
+    }
+
+    @ViewBuilder
+    private func feedbackList(imageSize: (Int, Int)) -> some View {
+        if store.marks.isEmpty {
+            Text("Click the preview to leave a note.")
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: 25)
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 6) {
+                    ForEach($store.marks) { $mark in
+                        MarkEditor(mark: $mark, imageSize: imageSize,
+                                   focusedMark: $focusedMark) {
+                            store.marks.removeAll { $0.id == mark.id }
+                        } onSelect: {
+                            if let time = mark.time { store.seek(to: time) }
                         }
                     }
-                    Spacer()
                 }
-                .lineLimit(1)
             }
-            if store.loopEnabled {
-                Text("Repeats \(timeLabel(store.loopStart))–\(timeLabel(store.loopEnd))")
-                    .font(.caption).foregroundStyle(.secondary)
+            .frame(maxHeight: 112)
+        }
+    }
+
+    private var shareControls: some View {
+        VStack(spacing: 5) {
+            Button { store.export() } label: {
+                Label("Share feedback", systemImage: "square.and.arrow.up")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            if store.lastExport != nil {
+                Button("Copy for agent", systemImage: "document.on.document") { store.copyForAgent() }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+            } else if store.status != "Screenshot ready. Select a tool and mark the image." &&
+                        store.status != "Clip ready. Play it, pause on an issue, then add a note." {
+                Text(store.status).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             }
         }
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "record.circle")
-                .font(.system(size: 36, weight: .regular))
-                .foregroundStyle(.tint)
-            Text("Record a UI issue")
-                .font(.system(size: 26, weight: .semibold))
-            Text("Pause where it feels wrong. Add a pin, guide, or measurement.")
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 420)
-            Button("Record screen", systemImage: "record.circle") { store.toggleRecording() }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(store.isCapturing)
-                .padding(.top, 3)
-            HStack(spacing: 18) {
-                Button("Capture one window") { store.captureWindow() }
-                    .disabled(store.isCapturing)
-                Text("or").foregroundStyle(.tertiary)
-                Button("Open screenshot or clip…") { importMedia() }
-            }
-            .buttonStyle(.link)
-            .font(.callout)
-            Text("Nothing is uploaded unless you share it.")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .padding(.top, 2)
-        }
-        .padding(24)
+    private var canvasMarks: [ReviewMark] {
+        store.marks + (store.pendingGapPreview.map { [$0] } ?? [])
     }
 
-    private var recordingState: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "record.circle.fill")
-                .font(.system(size: 42))
-                .foregroundStyle(.red)
-            Text("Recording screen")
-                .font(.title2.weight(.semibold))
-            Text("Switch to the app you’re reviewing. Return here when you’re ready to stop.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: 420)
-            Button("Stop recording", systemImage: "stop.fill") { store.toggleRecording() }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .controlSize(.large)
-                .disabled(store.isCapturing)
-        }
-        .padding(24)
+    private func addMark(start: UnitPoint2D, end: UnitPoint2D?) {
+        store.addMark(start: start, end: end)
+        if let mark = store.marks.last { focusedMark = mark.id }
     }
 
     private func importMedia() {
@@ -222,99 +286,36 @@ struct ContentView: View {
             store.openImage(at: url)
         }
     }
-
-    private var canvasMarks: [ReviewMark] {
-        store.marks + (store.pendingGapPreview.map { [$0] } ?? [])
-    }
-
-    private var inspector: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Review").font(.title3.weight(.semibold))
-            TextField("What are we reviewing?", text: $store.title).textFieldStyle(.roundedBorder)
-            if store.videoURL != nil {
-                Text("\(instruction(for: store.tool)) Note at \(timeLabel(store.currentTime)).")
-                    .font(.callout).foregroundStyle(.secondary)
-            } else if store.screenshot != nil {
-                Text(instruction(for: store.tool))
-                    .font(.callout).foregroundStyle(.secondary)
-            }
-            if store.compare, store.reference != nil {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Before / after").font(.headline)
-                    Slider(value: $store.comparisonFraction, in: 0...1)
-                    HStack { Text("Before"); Spacer(); Text("After") }
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                .padding(.vertical, 5)
-            }
-            HStack {
-                Text("Notes (\(store.marks.count))").font(.headline)
-                Spacer()
-                if store.screenshot != nil || store.videoURL != nil {
-                    Button("Before image…") { store.importReference() }
-                }
-                if !store.marks.isEmpty {
-                    Button("Clear") { store.marks = [] }
-                }
-            }
-            ScrollView {
-                LazyVStack(spacing: 9) {
-                    ForEach($store.marks) { $mark in
-                        MarkEditor(mark: $mark, imageSize: store.screenshot.map(imagePixelSize) ??
-                            (Int(store.videoSize.width), Int(store.videoSize.height))) {
-                            store.marks.removeAll { $0.id == mark.id }
-                        } onSelect: {
-                            if let time = mark.time { store.seek(to: time) }
-                        }
-                    }
-                }
-                .padding(.vertical, 2)
-            }
-            Spacer(minLength: 0)
-            Button("Share review…", systemImage: "square.and.arrow.up") { store.export() }
-                .buttonStyle(.borderedProminent)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .disabled(store.screenshot == nil && store.videoURL == nil)
-        }
-        .padding(16)
-    }
 }
 
 private struct MarkEditor: View {
     @Binding var mark: ReviewMark
     let imageSize: (Int, Int)
+    @FocusState.Binding var focusedMark: UUID?
     var onDelete: () -> Void
     var onSelect: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Button(action: onSelect) {
-                    HStack(spacing: 6) {
-                        Image(systemName: symbol(for: mark.kind)).foregroundStyle(.red)
-                        Text(mark.kind.rawValue).font(.subheadline.weight(.medium))
-                        if let time = mark.time { Text("· \(timeLabel(time))").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
-                    }
-                }
-                .buttonStyle(.plain)
-                Spacer()
-                Button(role: .destructive, action: onDelete) { Image(systemName: "trash") }
-                    .buttonStyle(.plain).accessibilityLabel("Delete note")
+        HStack(spacing: 7) {
+            Button(action: onSelect) {
+                Image(systemName: symbol(for: mark.kind))
+                    .foregroundStyle(.red)
+                    .frame(width: 16)
             }
+            .buttonStyle(.plain)
+            TextField("Add a comment…", text: $mark.note, axis: .vertical)
+                .lineLimit(1...2)
+                .textFieldStyle(.plain)
+                .focused($focusedMark, equals: mark.id)
             if mark.kind == .measure, let pixels = mark.distanceInPixels(width: imageSize.0, height: imageSize.1) {
-                Text("\(Int(pixels.rounded())) px \(measureDirection(mark, imageSize: imageSize))")
-                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-            } else if mark.kind == .compareGaps,
-                      let a = mark.distanceInPixels(width: imageSize.0, height: imageSize.1),
-                      let b = mark.secondDistanceInPixels(width: imageSize.0, height: imageSize.1) {
-                Text("A: \(Int(a.rounded())) px  ·  B: \(Int(b.rounded())) px  ·  Difference: \(Int(abs(a - b).rounded())) px")
-                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                Text("\(Int(pixels.rounded())) px").font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
             }
-            TextField("Add a short note…", text: $mark.note, axis: .vertical)
-                .lineLimit(2...4).textFieldStyle(.roundedBorder)
+            Button(role: .destructive, action: onDelete) { Image(systemName: "xmark") }
+                .buttonStyle(.plain).font(.caption2).accessibilityLabel("Delete note")
         }
-        .padding(10)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

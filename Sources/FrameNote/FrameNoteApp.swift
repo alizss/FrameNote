@@ -1,12 +1,45 @@
+import AppKit
 import SwiftUI
 
+@MainActor
 @main
-struct FrameNoteApp: App {
-    var body: some Scene {
-        WindowGroup("FrameNote") {
-            ContentView()
-        }
-        .defaultSize(width: 620, height: 480)
-        .windowResizability(.contentMinSize)
+final class FrameNoteAppDelegate: NSObject, NSApplicationDelegate {
+    private var panel: FloatingPanel?
+
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = FrameNoteAppDelegate()
+        application.delegate = delegate
+        application.setActivationPolicy(.regular)
+        application.run()
     }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let panel = FloatingPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 154),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        panel.contentView = NSHostingView(rootView: ContentView())
+        panel.isFloatingPanel = true
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.isMovableByWindowBackground = true
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+        self.panel = panel
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+}
+
+private final class FloatingPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 }

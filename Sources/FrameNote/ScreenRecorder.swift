@@ -10,7 +10,12 @@ final class ScreenRecorder {
 
     func start() async throws {
         guard session == nil else { return }
-        let shareable = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let shareable: SCShareableContent
+        do {
+            shareable = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        } catch {
+            throw Self.actionableCaptureError(error)
+        }
         guard let display = shareable.displays.first else {
             throw RecorderError.noDisplay
         }
@@ -28,8 +33,19 @@ final class ScreenRecorder {
         let output = FileManager.default.temporaryDirectory
             .appendingPathComponent("FrameNote-\(UUID().uuidString).mov")
         let newSession = try ScreenRecordingSession(filter: filter, configuration: configuration, outputURL: output)
-        try await newSession.start()
+        do {
+            try await newSession.start()
+        } catch {
+            throw Self.actionableCaptureError(error)
+        }
         session = newSession
+    }
+
+    private static func actionableCaptureError(_ error: Error) -> Error {
+        let captureError = error as NSError
+        guard captureError.domain == SCStreamErrorDomain,
+              captureError.code == SCStreamError.userDeclined.rawValue else { return error }
+        return RecorderError.screenRecordingPermission
     }
 
     func stop() async throws -> URL {
@@ -43,12 +59,14 @@ private enum RecorderError: LocalizedError {
     case noDisplay
     case notRecording
     case noFrames
+    case screenRecordingPermission
 
     var errorDescription: String? {
         switch self {
         case .noDisplay: "No screen is available to record."
         case .notRecording: "There is no active recording."
         case .noFrames: "No video frames were recorded. Try again after granting Screen Recording permission."
+        case .screenRecordingPermission: "Turn on FrameNote in Privacy & Security → Screen & System Audio Recording, then reopen it."
         }
     }
 }
