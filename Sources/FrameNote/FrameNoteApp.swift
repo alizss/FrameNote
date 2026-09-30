@@ -17,18 +17,22 @@ final class FrameNoteAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let panel = FloatingPanel(
             contentRect: NSRect(x: 0, y: 0, width: 360, height: 154),
-            styleMask: [.borderless],
+            styleMask: [.borderless, .resizable],
             backing: .buffered,
             defer: false
         )
-        panel.contentView = NSHostingView(rootView: ContentView())
+        let hostingView = NSHostingView(rootView: ContentView())
+        hostingView.sizingOptions = []
+        panel.contentView = hostingView
+        panel.contentMinSize = NSSize(width: 360, height: 154)
+        panel.contentMaxSize = panel.contentMinSize
         panel.isFloatingPanel = true
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
-        panel.isMovableByWindowBackground = true
+        panel.isMovableByWindowBackground = false
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.center()
@@ -45,17 +49,32 @@ final class FloatingPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
-    func resizeWidget(to height: CGFloat) {
-        var frame = self.frame
-        guard abs(height - frame.height) > 0.5 else { return }
-        let centerY = frame.midY
-        frame.size.height = height
-        frame.origin.y = centerY - height / 2
-        if let visibleFrame = (screen ?? NSScreen.main)?.visibleFrame {
-            let highestVisibleOrigin = max(visibleFrame.minY, visibleFrame.maxY - frame.height)
-            frame.origin.y = min(max(frame.origin.y, visibleFrame.minY), highestVisibleOrigin)
+    private var isReviewMode = false
+    private var savedReviewSize = NSSize(width: 1040, height: 700)
+
+    func setReviewMode(_ reviewing: Bool) {
+        guard reviewing != isReviewMode else { return }
+        if isReviewMode { savedReviewSize = frame.size }
+        isReviewMode = reviewing
+        let center = NSPoint(x: frame.midX, y: frame.midY)
+        let visible = (screen ?? NSScreen.main)?.visibleFrame ?? frame
+        let targetSize = reviewing
+            ? NSSize(width: min(savedReviewSize.width, visible.width),
+                     height: min(savedReviewSize.height, visible.height))
+            : NSSize(width: 360, height: 154)
+        if reviewing {
+            contentMaxSize = visible.size
+            contentMinSize = NSSize(width: min(760, visible.width), height: min(500, visible.height))
+        } else {
+            contentMinSize = targetSize
+            contentMaxSize = targetSize
         }
-        setFrame(frame, display: true, animate: true)
+        var target = NSRect(x: center.x - targetSize.width / 2,
+                            y: center.y - targetSize.height / 2,
+                            width: targetSize.width, height: targetSize.height)
+        target.origin.x = min(max(target.minX, visible.minX), visible.maxX - target.width)
+        target.origin.y = min(max(target.minY, visible.minY), visible.maxY - target.height)
+        setFrame(target, display: true, animate: false)
         makeKeyAndOrderFront(nil)
     }
 }

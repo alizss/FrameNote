@@ -14,11 +14,13 @@ open ~/Applications/FrameNote.app
 1. Click **Record** to capture the primary display, or open a screenshot, image, or video. FrameNote’s own windows are excluded from screen recordings. Recording captures video only; it does not record audio.
 2. Play the clip and pause where the UI issue appears. Choose a tool and click or drag on the picture. Each note is attached to the marked position and timestamp.
 3. Add a short comment. Click a note’s time to jump back to that moment. **Loop 3s** repeats the three seconds around the playhead.
-4. Click **Share review** to export the original recording or image, marked moments, notes, and a structured JSON report. After exporting, **Copy for agent** copies a paste-ready summary with the evidence folder path.
+4. Click **Share feedback** to export the original recording or image, marked moments, notes, and a structured JSON report. After exporting, **Copy for agent** copies a paste-ready summary with the evidence folder path.
+
+Capture controls stay in a small floating widget. Stop opens a larger review in the same floating window: drag an edge to resize it, use the magnifiers to zoom, and type beside the image in Comments. Drag the header to move the window. The collapse button returns to the small widget without losing the current review.
 
 The tools are:
 
-- **Pin:** click an element and describe it.
+- **Comment:** click an element and type into the focused comment field.
 - **Guide:** place a full-screen horizontal or vertical alignment line with one click.
 - **Measure gap:** drag between two points to see the distance in screenshot pixels.
 - **Compare gaps:** drag across gap A, then gap B. FrameNote reports both sizes and their difference.

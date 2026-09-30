@@ -8,6 +8,6 @@ let package = Package(
     targets: [
         .target(name: "FrameNoteCore"),
         .executableTarget(name: "FrameNote", dependencies: ["FrameNoteCore"]),
-        .testTarget(name: "FrameNoteTests", dependencies: ["FrameNoteCore"]),
+        .testTarget(name: "FrameNoteTests", dependencies: ["FrameNoteCore", "FrameNote"]),
     ]
 )

@@ -36,6 +36,7 @@ final class ReviewStore: ObservableObject {
     @Published var status = "Choose a screenshot or capture a window to start."
     @Published var isCapturing = false
     @Published var isRecording = false
+    @Published var isPlaying = false
     @Published var lastExport: URL?
 
     private let recorder = ScreenRecorder()
@@ -177,7 +178,25 @@ final class ReviewStore: ObservableObject {
         }
     }
 
+    func togglePlayback() {
+        guard let player else { return }
+        if player.rate == 0 {
+            if duration > 0, currentTime >= duration - 0.05 { seek(to: 0) }
+            player.play()
+            isPlaying = true
+        } else {
+            pauseForAnnotation()
+        }
+    }
+
+    func pauseForAnnotation() {
+        player?.pause()
+        isPlaying = false
+        if let time = player?.currentTime().seconds, time.isFinite { currentTime = time }
+    }
+
     private func clearVideo() {
+        isPlaying = false
         if let timeObserver, let player { player.removeTimeObserver(timeObserver) }
         timeObserver = nil
         player?.pause()
@@ -213,6 +232,7 @@ final class ReviewStore: ObservableObject {
                 let seconds = time.seconds
                 guard seconds.isFinite else { return }
                 currentTime = seconds
+                isPlaying = (player?.rate ?? 0) != 0
                 if loopEnabled, loopEnd > loopStart, seconds >= loopEnd {
                     seek(to: loopStart)
                 }
@@ -238,12 +258,13 @@ final class ReviewStore: ObservableObject {
             loopEnabled = true
             seek(to: loopStart)
             player?.play()
+            isPlaying = true
         }
     }
 
     func addMark(start: UnitPoint2D, end: UnitPoint2D?) {
         guard screenshot != nil || videoURL != nil else { return }
-        if videoURL != nil { player?.pause() }
+        if videoURL != nil { pauseForAnnotation() }
         let time = videoURL == nil ? nil : currentTime
         if tool == .point || tool == .guideHorizontal || tool == .guideVertical {
             marks.append(ReviewMark(kind: tool, start: start, time: time, note: ""))
