@@ -66,7 +66,7 @@ struct ContentView: View {
                 .menuStyle(.borderlessButton)
                 .help("More actions")
             }
-            Button { NSApp.keyWindow?.close() } label: {
+            Button { NSApp.terminate(nil) } label: {
                 Image(systemName: "xmark")
                     .font(.caption.weight(.semibold))
                     .frame(width: 22, height: 22)

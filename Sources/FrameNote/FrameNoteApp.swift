@@ -36,7 +36,9 @@ final class FrameNoteAppDelegate: NSObject, NSApplicationDelegate {
         self.panel = panel
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    // AppKit excludes NSPanel from its last-window count. ScreenCaptureKit's
+    // recording-indicator windows close on Stop while our widget is still open.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
 final class FloatingPanel: NSPanel {
