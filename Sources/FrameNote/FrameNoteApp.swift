@@ -39,7 +39,16 @@ final class FrameNoteAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }
 
-private final class FloatingPanel: NSPanel {
+final class FloatingPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    func resizeWidget(to height: CGFloat) {
+        var frame = self.frame
+        let heightChange = height - frame.height
+        guard abs(heightChange) > 0.5 else { return }
+        frame.origin.y -= heightChange
+        frame.size.height = height
+        setFrame(frame, display: true, animate: true)
+    }
 }

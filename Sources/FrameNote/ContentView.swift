@@ -35,6 +35,9 @@ struct ContentView: View {
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.primary.opacity(0.08), lineWidth: 1))
         .preferredColorScheme(.light)
         .animation(.easeInOut(duration: 0.18), value: widgetHeight)
+        .onChange(of: widgetHeight) { _, height in
+            NSApp.windows.compactMap { $0 as? FloatingPanel }.first?.resizeWidget(to: height)
+        }
     }
 
     private var header: some View {
