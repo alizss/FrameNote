@@ -266,9 +266,13 @@ final class ReviewStore: ObservableObject {
         guard screenshot != nil || videoURL != nil else { return }
         if videoURL != nil { pauseForAnnotation() }
         let time = videoURL == nil ? nil : currentTime
+        if tool == .point, let end, abs(end.x - start.x) > 0.005, abs(end.y - start.y) > 0.005 {
+            marks.append(ReviewMark(kind: .focus, start: start, end: end, time: time, note: ""))
+            return
+        }
         if tool == .point || tool == .guideHorizontal || tool == .guideVertical {
             marks.append(ReviewMark(kind: tool, start: start, time: time, note: ""))
-            status = "\(tool.rawValue) added. Add a note in the feedback panel."
+            status = "\(tool.rawValue) added. Write a comment beside the selection."
             return
         }
         guard let end else { return }
@@ -285,7 +289,7 @@ final class ReviewStore: ObservableObject {
             return
         }
         marks.append(ReviewMark(kind: tool, start: start, end: end, time: time, note: ""))
-        status = "\(tool.rawValue) added. Add a note in the feedback panel."
+        status = "\(tool.rawValue) added. Write a comment beside the selection."
     }
 
     func export() {

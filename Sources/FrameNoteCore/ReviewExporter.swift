@@ -76,7 +76,7 @@ public enum ReviewExporter {
                       ) else { continue }
                 let stem = String(format: "moment-%02d", index + 1)
                 try pngData(for: frame).write(to: folder.appendingPathComponent("\(stem).png"))
-                try annotatedPNG(source: frame, marks: [mark]).write(
+                try annotatedPNG(source: frame, marks: [mark], numberOffset: index).write(
                     to: folder.appendingPathComponent("\(stem)-marked.png")
                 )
                 if mark.kind == .focus {
@@ -120,7 +120,7 @@ public enum ReviewExporter {
         return try pngData(for: cropped)
     }
 
-    private static func annotatedPNG(source: CGImage, marks: [ReviewMark]) throws -> Data {
+    private static func annotatedPNG(source: CGImage, marks: [ReviewMark], numberOffset: Int = 0) throws -> Data {
         let width = source.width
         let height = source.height
         guard let bitmap = NSBitmapImageRep(
@@ -143,7 +143,7 @@ public enum ReviewExporter {
             .draw(in: NSRect(x: 0, y: 0, width: width, height: height))
         let scale = max(1, min(CGFloat(width), CGFloat(height)) / 1000)
         for (index, mark) in marks.enumerated() {
-            draw(mark, number: index + 1, width: width, height: height, scale: scale)
+            draw(mark, number: index + 1 + numberOffset, width: width, height: height, scale: scale)
         }
         context.flushGraphics()
         NSGraphicsContext.restoreGraphicsState()
@@ -156,25 +156,25 @@ public enum ReviewExporter {
     private static func draw(_ mark: ReviewMark, number: Int, width: Int, height: Int, scale: CGFloat) {
         let start = NSPoint(x: mark.start.x * CGFloat(width), y: (1 - mark.start.y) * CGFloat(height))
         let end = mark.end.map { NSPoint(x: $0.x * CGFloat(width), y: (1 - $0.y) * CGFloat(height)) }
-        let red = NSColor.systemRed
+        let red = NSColor.systemBlue
         switch mark.kind {
         case .point:
             badge(at: start, number: number, scale: scale, color: red)
         case .guideHorizontal:
             line(from: NSPoint(x: 0, y: start.y), to: NSPoint(x: CGFloat(width), y: start.y),
-                 color: .systemOrange, scale: scale, dashed: true)
-            drawLabel("H GUIDE", at: NSPoint(x: 44 * scale, y: start.y + 10 * scale), scale: scale, color: .systemOrange)
+                 color: .systemBlue, scale: scale, dashed: true)
+            drawLabel("H GUIDE", at: NSPoint(x: 44 * scale, y: start.y + 10 * scale), scale: scale, color: .systemBlue)
         case .guideVertical:
             line(from: NSPoint(x: start.x, y: 0), to: NSPoint(x: start.x, y: CGFloat(height)),
-                 color: .systemOrange, scale: scale, dashed: true)
-            drawLabel("V GUIDE", at: NSPoint(x: start.x + 35 * scale, y: CGFloat(height) - 15 * scale), scale: scale, color: .systemOrange)
+                 color: .systemBlue, scale: scale, dashed: true)
+            drawLabel("V GUIDE", at: NSPoint(x: start.x + 35 * scale, y: CGFloat(height) - 15 * scale), scale: scale, color: .systemBlue)
         case .focus:
             if let end {
                 let rect = NSRect(x: min(start.x, end.x), y: min(start.y, end.y),
                                   width: abs(start.x - end.x), height: abs(start.y - end.y))
-                NSColor.systemYellow.withAlphaComponent(0.16).setFill()
+                NSColor.systemBlue.withAlphaComponent(0.04).setFill()
                 NSBezierPath(roundedRect: rect, xRadius: 6 * scale, yRadius: 6 * scale).fill()
-                lineRect(rect, color: .systemYellow, scale: scale)
+                lineRect(rect, color: .systemBlue, scale: scale)
                 badge(at: NSPoint(x: rect.minX, y: rect.maxY), number: number, scale: scale, color: red)
             }
         case .move:
@@ -190,17 +190,17 @@ public enum ReviewExporter {
             if let end {
                 line(from: start, to: end, color: red, scale: scale)
                 let angle = atan2(end.y - start.y, end.x - start.x)
-                line(from: end, to: NSPoint(x: end.x - cos(angle - .pi / 6) * 15 * scale,
-                                            y: end.y - sin(angle - .pi / 6) * 15 * scale), color: red, scale: scale)
-                line(from: end, to: NSPoint(x: end.x - cos(angle + .pi / 6) * 15 * scale,
-                                            y: end.y - sin(angle + .pi / 6) * 15 * scale), color: red, scale: scale)
+                line(from: end, to: NSPoint(x: end.x - cos(angle - .pi / 6) * 8 * scale,
+                                            y: end.y - sin(angle - .pi / 6) * 8 * scale), color: red, scale: scale)
+                line(from: end, to: NSPoint(x: end.x - cos(angle + .pi / 6) * 8 * scale,
+                                            y: end.y - sin(angle + .pi / 6) * 8 * scale), color: red, scale: scale)
                 badge(at: start, number: number, scale: scale, color: red)
             }
         case .measure:
             if let end {
                 line(from: start, to: end, color: red, scale: scale)
-                ring(at: start, radius: 5 * scale, color: red, scale: scale, filled: true)
-                ring(at: end, radius: 5 * scale, color: red, scale: scale, filled: true)
+                ring(at: start, radius: 2 * scale, color: red, scale: scale, filled: true)
+                ring(at: end, radius: 2 * scale, color: red, scale: scale, filled: true)
                 let dx = abs((mark.end?.x ?? mark.start.x) - mark.start.x) * Double(width)
                 let dy = abs((mark.end?.y ?? mark.start.y) - mark.start.y) * Double(height)
                 let amount = Int(hypot(dx, dy).rounded())
@@ -223,7 +223,7 @@ public enum ReviewExporter {
 
     private static func line(from start: NSPoint, to end: NSPoint, color: NSColor, scale: CGFloat, dashed: Bool = false) {
         let path = NSBezierPath()
-        path.lineWidth = 3 * scale
+        path.lineWidth = 1.25 * scale
         path.lineCapStyle = .round
         if dashed { var pattern: [CGFloat] = [7 * scale, 5 * scale]; path.setLineDash(&pattern, count: pattern.count, phase: 0) }
         path.move(to: start); path.line(to: end)
@@ -233,23 +233,24 @@ public enum ReviewExporter {
     private static func ring(at point: NSPoint, radius: CGFloat, color: NSColor, scale: CGFloat, filled: Bool = false) {
         let path = NSBezierPath(ovalIn: NSRect(x: point.x - radius, y: point.y - radius,
                                                width: radius * 2, height: radius * 2))
-        path.lineWidth = 3 * scale
+        path.lineWidth = 1.25 * scale
         if filled { color.setFill(); path.fill() } else { color.setStroke(); path.stroke() }
     }
 
     private static func lineRect(_ rect: NSRect, color: NSColor, scale: CGFloat) {
         let path = NSBezierPath(roundedRect: rect, xRadius: 6 * scale, yRadius: 6 * scale)
-        path.lineWidth = 3 * scale; color.setStroke(); path.stroke()
+        path.lineWidth = 1.25 * scale; color.setStroke(); path.stroke()
     }
 
     private static func badge(at point: NSPoint, number: Int, scale: CGFloat, color: NSColor) {
-        let radius = 13 * scale
+        let radius = 8 * scale
         let badge = NSBezierPath(ovalIn: NSRect(x: point.x - radius, y: point.y - radius,
                                               width: radius * 2, height: radius * 2))
-        color.setFill(); badge.fill()
+        NSColor.white.setFill(); badge.fill()
+        badge.lineWidth = scale; color.setStroke(); badge.stroke()
         let numberText = "\(number)" as NSString
-        let font = NSFont.boldSystemFont(ofSize: 13 * scale)
-        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.white]
+        let font = NSFont.systemFont(ofSize: 10 * scale, weight: .medium)
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
         let size = numberText.size(withAttributes: attributes)
         numberText.draw(at: NSPoint(x: point.x - size.width / 2, y: point.y - size.height / 2), withAttributes: attributes)
     }
@@ -257,12 +258,15 @@ public enum ReviewExporter {
     private static func drawLabel(_ value: String, at point: NSPoint, scale: CGFloat, color: NSColor) {
         let string = value as NSString
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.boldSystemFont(ofSize: 12 * scale),
+            .font: NSFont.systemFont(ofSize: 11 * scale, weight: .medium),
             .foregroundColor: color,
-            .strokeColor: NSColor.black,
-            .strokeWidth: -2 * scale,
         ]
         let size = string.size(withAttributes: attributes)
+        NSColor.white.withAlphaComponent(0.95).setFill()
+        NSBezierPath(roundedRect: NSRect(x: point.x - size.width / 2 - 4 * scale,
+                                        y: point.y - size.height / 2 - 2 * scale,
+                                        width: size.width + 8 * scale, height: size.height + 4 * scale),
+                     xRadius: 4 * scale, yRadius: 4 * scale).fill()
         string.draw(at: NSPoint(x: point.x - size.width / 2, y: point.y - size.height / 2), withAttributes: attributes)
     }
 }

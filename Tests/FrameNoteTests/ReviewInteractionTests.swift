@@ -76,6 +76,7 @@ final class ReviewInteractionTests: XCTestCase {
         store.videoURL = URL(fileURLWithPath: "/tmp/framenote-input-test.mov")
         store.videoSize = CGSize(width: 1000, height: 600)
         store.player = AVPlayer()
+        store.duration = 10
         let panel = FloatingPanel(contentRect: NSRect(x: 60, y: 60, width: 1040, height: 700),
                                   styleMask: [.borderless, .resizable], backing: .buffered, defer: false)
         panel.isReleasedWhenClosed = false
@@ -86,13 +87,66 @@ final class ReviewInteractionTests: XCTestCase {
         defer { panel.close() }
         try await Task.sleep(for: .milliseconds(250))
         let input = try XCTUnwrap(Self.inputView(in: host))
-        let location = NSPoint(x: input.bounds.midX, y: input.bounds.midY)
-        XCTAssertTrue(host.hitTest(input.convert(location, to: host)) === input)
-        input.mouseDown(with: Self.event(.leftMouseDown, at: location, in: input))
-        input.mouseUp(with: Self.event(.leftMouseUp, at: location, in: input))
+        let start = NSPoint(x: input.bounds.width * 0.1, y: input.bounds.height * 0.15)
+        let end = NSPoint(x: input.bounds.width * 0.35, y: input.bounds.height * 0.4)
+        XCTAssertTrue(host.hitTest(input.convert(start, to: host)) === input)
+        input.mouseDown(with: Self.event(.leftMouseDown, at: start, in: input))
+        input.mouseDragged(with: Self.event(.leftMouseDragged, at: end, in: input))
+        input.mouseUp(with: Self.event(.leftMouseUp, at: end, in: input))
         try await Task.sleep(for: .milliseconds(150))
         XCTAssertEqual(store.marks.count, 1)
+        XCTAssertEqual(store.marks.first?.kind, .focus)
         XCTAssertNotNil(store.marks.first?.time)
+        let id = try XCTUnwrap(store.marks.first?.id)
+        let editor = try XCTUnwrap(panel.firstResponder as? NSTextView)
+        editor.insertText("The menu jumps here.", replacementRange: NSRange(location: NSNotFound, length: 0))
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(store.marks.first?.note, "The menu jumps here.")
+
+        let timeline = try XCTUnwrap(Self.find(VideoTimelineView.self, in: host))
+        timeline.selecting = true
+        let a = NSPoint(x: 8 + (timeline.bounds.width - 16) * 0.2, y: 15)
+        let b = NSPoint(x: 8 + (timeline.bounds.width - 16) * 0.6, y: 15)
+        timeline.mouseDown(with: Self.event(.leftMouseDown, at: a, in: timeline))
+        timeline.mouseDragged(with: Self.event(.leftMouseDragged, at: b, in: timeline))
+        timeline.mouseUp(with: Self.event(.leftMouseUp, at: b, in: timeline))
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(store.marks.count, 1, "Time selection should attach to the selected area comment.")
+        XCTAssertEqual(store.marks.first?.id, id)
+        XCTAssertEqual(try XCTUnwrap(store.marks.first?.time), 2, accuracy: 0.01)
+        XCTAssertEqual(try XCTUnwrap(store.marks.first?.endTime), 6, accuracy: 0.01)
+        XCTAssertEqual(store.marks.first?.note, "The menu jumps here.")
+
+        // Resize the end handle and keep the same spatial selection and comment.
+        let c = NSPoint(x: 8 + (timeline.bounds.width - 16) * 0.8, y: 15)
+        timeline.mouseDown(with: Self.event(.leftMouseDown, at: b, in: timeline))
+        timeline.mouseDragged(with: Self.event(.leftMouseDragged, at: c, in: timeline))
+        timeline.mouseUp(with: Self.event(.leftMouseUp, at: c, in: timeline))
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(try XCTUnwrap(store.marks.first?.endTime), 8, accuracy: 0.01)
+        XCTAssertEqual(try XCTUnwrap(store.marks.first?.end?.x), 0.35, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(store.marks.first?.end?.y), 0.4, accuracy: 0.001)
+
+        // Clicking an existing area reopens it without creating duplicate notes.
+        input.mouseDown(with: Self.event(.leftMouseDown, at: start, in: input))
+        input.mouseUp(with: Self.event(.leftMouseUp, at: start, in: input))
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(store.marks.count, 1)
+        XCTAssertNotNil(panel.firstResponder as? NSTextView)
+        if let path = ProcessInfo.processInfo.environment["FRAMENOTE_REVIEW_SNAPSHOT"],
+           let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path + "-video.png"))
+        }
+    }
+
+    @MainActor
+    private static func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
+        if let match = view as? T { return match }
+        for child in view.subviews {
+            if let match = find(type, in: child) { return match }
+        }
+        return nil
     }
 
     @MainActor

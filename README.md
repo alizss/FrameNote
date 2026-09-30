@@ -12,17 +12,17 @@ open ~/Applications/FrameNote.app
 ```
 
 1. Click **Record** to capture the primary display, or open a screenshot, image, or video. FrameNote’s own windows are excluded from screen recordings. Recording captures video only; it does not record audio.
-2. Play the clip and pause where the UI issue appears. Choose a tool and click or drag on the picture. Each note is attached to the marked position and timestamp.
-3. Add a short comment. Click a note’s time to jump back to that moment. **Loop 3s** repeats the three seconds around the playhead.
+2. Pause where the issue appears. With **Comment** selected, drag a box around the relevant area (or click a point), then type in the small comment card beside it. **Done** closes the card; click the marked area or use the comments menu to reopen it.
+3. To comment on motion, choose **Select time** and drag across the playback bar. Drag either blue handle to adjust the start or end. This attaches the range to the open comment, or creates a new one. You can select time first and then draw an area before typing. The annotation stays visible throughout its time range. The repeat button loops three seconds around the playhead.
 4. Click **Share feedback** to export the original recording or image, marked moments, notes, and a structured JSON report. After exporting, **Copy for agent** copies a paste-ready summary with the evidence folder path.
 
-Capture controls stay in a small floating widget. Stop opens a larger review in the same floating window: drag an edge to resize it, use the magnifiers to zoom, and type beside the image in Comments. Drag the header to move the window. The collapse button returns to the small widget without losing the current review.
+Capture controls stay in a small floating widget. Stop opens a larger review in the same floating window: drag an edge to resize it, use the magnifiers to zoom, and comment directly beside your selection. There is no permanent sidebar. Drag the header to move the window. The collapse button returns to the small widget without losing the current review.
 
 FrameNote also lives in the macOS menu bar. Click its viewfinder icon to show or hide the widget. The widget's × button hides it and keeps the current review in memory; right-click the menu-bar icon for **Quit FrameNote**.
 
 The tools are:
 
-- **Comment:** click an element and type into the focused comment field.
+- **Comment:** drag to select an area or click an element, then type. Video comments can cover one frame or a time range.
 - **Guide:** place a full-screen horizontal or vertical alignment line with one click.
 - **Measure gap:** drag between two points to see the distance in screenshot pixels.
 - **Compare gaps:** drag across gap A, then gap B. FrameNote reports both sizes and their difference.
@@ -40,8 +40,8 @@ The timestamped review folder includes:
 - `screenshot.png` and `annotated.png` as a poster frame for clips or the original screenshot and its annotations for still reviews
 - A `moment-XX.png` and `moment-XX-marked.png` pair for each video note, plus a `focus` crop when that note uses **Focus area**
 - A `focus-XX.png` crop for each still image focus note
-- `feedback.md` with comments, locations, measured gaps, and timestamps
-- `feedback.json` with normalized coordinates, times, mark types, and loop bounds
+- `feedback.md` with comments, locations, measured gaps, and timestamps or time ranges
+- `feedback.json` with normalized coordinates, start/end times, mark types, and loop bounds
 - `reference.png` when a before image is provided
 
 ## Development

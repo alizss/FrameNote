@@ -25,6 +25,28 @@ final class FrameNoteTests: XCTestCase {
         XCTAssertTrue(ReviewMarkdown.generate(decoded).contains("Match this gap"))
     }
 
+    func testTimeRangePersistsAndAppearsOnlyDuringSelectedInterval() throws {
+        let mark = ReviewMark(kind: .focus, start: UnitPoint2D(x: 0.2, y: 0.3),
+                              end: UnitPoint2D(x: 0.7, y: 0.8), time: 2.5, endTime: 6.0,
+                              note: "This transition jumps")
+        XCTAssertFalse(mark.isVisible(at: 2))
+        XCTAssertTrue(mark.isVisible(at: 2.5))
+        XCTAssertTrue(mark.isVisible(at: 4))
+        XCTAssertTrue(mark.isVisible(at: 6))
+        XCTAssertFalse(mark.isVisible(at: 7))
+        let data = try JSONEncoder().encode(mark)
+        XCTAssertEqual(try JSONDecoder().decode(ReviewMark.self, from: data), mark)
+        let manifest = ReviewManifest(createdAt: Date(), title: "Motion", imageWidth: 1000,
+                                      imageHeight: 600, referenceImageFile: nil, videoFile: "clip.mov", marks: [mark])
+        XCTAssertTrue(ReviewMarkdown.generate(manifest).contains("00:02.500–00:06.000"))
+        // Existing feedback files without endTime still decode as single-frame comments.
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        legacy.removeValue(forKey: "endTime")
+        let old = try JSONDecoder().decode(ReviewMark.self, from: JSONSerialization.data(withJSONObject: legacy))
+        XCTAssertNil(old.endTime)
+        XCTAssertFalse(old.isVisible(at: 4))
+    }
+
     func testPointsStayInsideCapturedImage() {
         XCTAssertEqual(UnitPoint2D(x: -2, y: 1.5), UnitPoint2D(x: 0, y: 1))
     }

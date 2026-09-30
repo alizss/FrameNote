@@ -31,11 +31,12 @@ public struct ReviewMark: Codable, Identifiable, Equatable {
     public var secondStart: UnitPoint2D?
     public var secondEnd: UnitPoint2D?
     public var time: Double?
+    public var endTime: Double?
     public var note: String
 
     public init(id: UUID = UUID(), kind: MarkKind, start: UnitPoint2D, end: UnitPoint2D? = nil,
                 secondStart: UnitPoint2D? = nil, secondEnd: UnitPoint2D? = nil,
-                time: Double? = nil, note: String) {
+                time: Double? = nil, endTime: Double? = nil, note: String) {
         self.id = id
         self.kind = kind
         self.start = start
@@ -43,7 +44,14 @@ public struct ReviewMark: Codable, Identifiable, Equatable {
         self.secondStart = secondStart
         self.secondEnd = secondEnd
         self.time = time
+        self.endTime = endTime
         self.note = note
+    }
+
+    public func isVisible(at currentTime: Double?) -> Bool {
+        guard let currentTime, let time else { return true }
+        if let endTime { return currentTime >= time - 0.03 && currentTime <= endTime + 0.03 }
+        return abs(time - currentTime) < 0.18
     }
 
     public func distanceInPixels(width: Int, height: Int) -> Double? {
@@ -115,7 +123,7 @@ public enum ReviewMarkdown {
         }
         for (index, mark) in manifest.marks.enumerated() {
             let position = "(\(Int((mark.start.x * 100).rounded()))%, \(Int((mark.start.y * 100).rounded()))%)"
-            let time = mark.time.map { " at \(timecode($0))" } ?? ""
+            let time = mark.time.map { " at \(timecode($0))" + (mark.endTime.map { "–\(timecode($0))" } ?? "") } ?? ""
             let distance = mark.kind == .measure
                 ? mark.distanceInPixels(width: manifest.imageWidth, height: manifest.imageHeight).map { " · ≈\(Int($0.rounded())) px" } ?? ""
                 : ""

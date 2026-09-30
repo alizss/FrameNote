@@ -9,6 +9,8 @@ struct ContentView: View {
     @FocusState private var focusedMark: UUID?
     @State private var collapsed = false
     @State private var zoom: CGFloat = 1
+    @State private var activeMark: UUID?
+    @State private var selectingTime = false
 
     init(store: ReviewStore = ReviewStore()) {
         _store = StateObject(wrappedValue: store)
@@ -138,34 +140,35 @@ struct ContentView: View {
         VStack(spacing: 10) {
             annotationTools
             Divider()
-            HStack(alignment: .top, spacing: 14) {
-                VStack(alignment: .leading, spacing: 10) {
-                    ReviewCanvas(
-                        screenshot: store.screenshot, player: store.player,
-                        aspect: store.screenshot?.size ?? store.videoSize,
-                        marks: store.marks + (store.pendingGapPreview.map { [$0] } ?? []),
-                        tool: store.tool, currentTime: store.videoURL == nil ? nil : store.currentTime,
-                        pixelSize: pixelSize, zoom: zoom,
-                        onStart: store.pauseForAnnotation, onMark: addMark,
-                        reference: store.reference, compare: store.compare,
-                        comparisonFraction: store.comparisonFraction
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    if store.player != nil { playbackControls }
-                    if store.compare, store.reference != nil {
-                        Slider(value: $store.comparisonFraction, in: 0...1)
-                    }
-                    Text(store.pendingGapPreview != nil
-                         ? "Gap A marked. Drag across gap B."
-                         : instruction(for: store.tool))
-                        .font(.caption).foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                Divider()
-                commentsSidebar.frame(width: 240)
+            ReviewCanvas(
+                screenshot: store.screenshot, player: store.player,
+                aspect: store.screenshot?.size ?? store.videoSize,
+                marks: store.marks + (store.pendingGapPreview.map { [$0] } ?? []),
+                tool: store.tool, currentTime: store.videoURL == nil ? nil : store.currentTime,
+                pixelSize: pixelSize, zoom: zoom, activeMark: activeMark,
+                onStart: store.pauseForAnnotation, onMark: addMark, onSelect: selectMark,
+                reference: store.reference, compare: store.compare,
+                comparisonFraction: store.comparisonFraction,
+                editor: { mark in commentEditor(for: mark) }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            if store.player != nil { playbackControls }
+            if store.compare, store.reference != nil {
+                Slider(value: $store.comparisonFraction, in: 0...1)
             }
-            .frame(maxHeight: .infinity)
+            HStack {
+                Text(selectingTime ? "Drag across the timeline to select a moment." :
+                     store.pendingGapPreview != nil ? "Gap A marked. Drag across gap B." : instruction(for: store.tool))
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if store.lastExport != nil {
+                    Button("Copy for agent") { store.copyForAgent() }.buttonStyle(.borderless)
+                }
+            }
+            if store.status.contains("failed") || store.status.hasPrefix("Exported") {
+                Text(store.status).font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -196,6 +199,16 @@ struct ContentView: View {
             }
             .menuStyle(.borderlessButton).fixedSize()
             Spacer(minLength: 8)
+            if !store.marks.isEmpty {
+                Menu {
+                    ForEach(Array(store.marks.enumerated()), id: \.element.id) { index, mark in
+                        Button("\(index + 1). \(mark.note.isEmpty ? "Comment" : String(mark.note.prefix(45)))") {
+                            selectMark(mark.id)
+                        }
+                    }
+                } label: { Label("\(store.marks.count)", systemImage: "bubble.left") }
+                .menuStyle(.borderlessButton).fixedSize().help("Reopen a comment")
+            }
             if store.reference != nil {
                 Button(store.compare ? "Done comparing" : "Compare") { store.compare.toggle() }
             }
@@ -225,16 +238,25 @@ struct ContentView: View {
 
     private var playbackControls: some View {
         HStack(spacing: 10) {
-            Button { store.togglePlayback() } label: {
+            Button { activeMark = nil; focusedMark = nil; selectingTime = false; store.togglePlayback() } label: {
                 Image(systemName: store.isPlaying ? "pause.fill" : "play.fill")
                     .frame(width: 26, height: 26)
             }
             .buttonStyle(.plain).accessibilityLabel(store.isPlaying ? "Pause" : "Play")
-            Slider(value: Binding(get: { store.currentTime }, set: {
+            VideoTimeline(currentTime: store.currentTime, duration: store.duration,
+                          selection: selectedRange, selecting: selectingTime,
+                          marks: store.marks, onSeek: { time in
+                store.pauseForAnnotation(); store.seek(to: time)
+            }, onRange: setTimeRange)
+                .frame(height: 30)
+            Button {
                 store.pauseForAnnotation()
-                store.seek(to: $0)
-            }), in: 0...max(store.duration, 0.01))
-                .disabled(store.duration <= 0)
+                selectingTime.toggle()
+            } label: {
+                Label(selectingTime ? "Cancel" : "Select time", systemImage: "selection.pin.in.out")
+            }
+            .buttonStyle(.borderless).foregroundStyle(selectingTime ? Color.accentColor : .secondary)
+            .disabled(store.duration <= 0)
             Text("\(timeLabel(store.currentTime)) / \(timeLabel(store.duration))")
                 .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             Button { store.toggleLoop() } label: {
@@ -247,70 +269,73 @@ struct ContentView: View {
         .frame(height: 30)
     }
 
-    private var commentsSidebar: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Comments").font(.headline)
-                Text("\(store.marks.count)").foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    store.tool = .point
-                    addMark(start: UnitPoint2D(x: 0.5, y: 0.5), end: nil)
-                } label: {
-                    Image(systemName: "plus.bubble").frame(width: 24, height: 24)
-                }
-                .buttonStyle(.borderless).help("Add a comment to the center of this frame")
-                .accessibilityLabel("Add comment")
-            }
-            if store.marks.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Image(systemName: "bubble.left.and.text.bubble.right")
-                        .font(.title2).foregroundStyle(.tertiary)
-                    Text("Point. Comment. Done.").font(.subheadline.weight(.medium))
-                    Text("Click the image to place a comment. Drag to draw arrows or measure a gap.")
-                        .font(.callout).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(.top, 20)
-                Spacer()
-            } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(spacing: 10) {
-                            ForEach($store.marks) { $mark in
-                                MarkEditor(mark: $mark,
-                                           number: (store.marks.firstIndex { $0.id == mark.id } ?? 0) + 1,
-                                           imageSize: pixelSize, focusedMark: $focusedMark) {
-                                    store.marks.removeAll { $0.id == mark.id }
-                                } onSelect: {
-                                    store.pauseForAnnotation()
-                                    if let time = mark.time { store.seek(to: time) }
-                                    focusedMark = mark.id
-                                }
-                                .id(mark.id)
-                            }
-                        }
-                        .padding(2)
-                    }
-                    .onChange(of: store.marks.count) { _, _ in
-                        if let last = store.marks.last { proxy.scrollTo(last.id, anchor: .bottom) }
-                    }
-                }
-            }
-            if store.lastExport != nil {
-                Button("Copy for agent", systemImage: "document.on.document") { store.copyForAgent() }
-                    .buttonStyle(.bordered).frame(maxWidth: .infinity)
-            }
-            Text(store.status).font(.caption2).foregroundStyle(.secondary)
-                .lineLimit(3).fixedSize(horizontal: false, vertical: true)
+    private var selectedRange: ClosedRange<Double>? {
+        guard let mark = store.marks.first(where: { $0.id == activeMark }),
+              let start = mark.time, let end = mark.endTime else { return nil }
+        return start...max(start, end)
+    }
+
+    @ViewBuilder private func commentEditor(for mark: ReviewMark) -> some View {
+        let binding = Binding<ReviewMark>(get: {
+            store.marks.first(where: { $0.id == mark.id }) ?? mark
+        }, set: { updated in
+            if let index = store.marks.firstIndex(where: { $0.id == mark.id }) { store.marks[index] = updated }
+        })
+        MarkEditor(mark: binding,
+                   number: (store.marks.firstIndex { $0.id == mark.id } ?? 0) + 1,
+                   focusedMark: $focusedMark,
+                   onDelete: {
+                       store.marks.removeAll { $0.id == mark.id }; activeMark = nil
+                   }, onDone: { activeMark = nil; focusedMark = nil },
+                   onTime: { selectingTime = true },
+                   onRemoveTime: {
+                       if let index = store.marks.firstIndex(where: { $0.id == mark.id }) {
+                           store.marks[index].endTime = nil
+                       }
+                   })
+    }
+
+    private func selectMark(_ id: UUID) {
+        guard let mark = store.marks.first(where: { $0.id == id }) else { return }
+        store.pauseForAnnotation()
+        if let time = mark.time { store.seek(to: time) }
+        activeMark = id
+        DispatchQueue.main.async { focusedMark = id }
+    }
+
+    private func setTimeRange(_ range: ClosedRange<Double>) {
+        store.pauseForAnnotation()
+        store.seek(to: range.lowerBound)
+        if let index = store.marks.firstIndex(where: { $0.id == activeMark }) {
+            store.marks[index].time = range.lowerBound
+            store.marks[index].endTime = range.upperBound
+        } else {
+            let mark = ReviewMark(kind: .point, start: UnitPoint2D(x: 0.5, y: 0.5),
+                                  time: range.lowerBound, endTime: range.upperBound, note: "")
+            store.marks.append(mark)
+            activeMark = mark.id
         }
-        .frame(maxHeight: .infinity, alignment: .top)
+        selectingTime = false
+        DispatchQueue.main.async { focusedMark = activeMark }
     }
 
     private func addMark(start: UnitPoint2D, end: UnitPoint2D?) {
+        // A time selection can be refined by drawing an area before writing its note.
+        if store.tool == .point, let end,
+           let index = store.marks.firstIndex(where: { $0.id == activeMark }),
+           store.marks[index].kind == .point, store.marks[index].endTime != nil,
+           store.marks[index].note.isEmpty,
+           abs(end.x - start.x) > 0.005, abs(end.y - start.y) > 0.005 {
+            store.marks[index].kind = .focus
+            store.marks[index].start = start
+            store.marks[index].end = end
+            focusedMark = activeMark
+            return
+        }
         let count = store.marks.count
         store.addMark(start: start, end: end)
         guard store.marks.count > count, let mark = store.marks.last else { return }
+        activeMark = mark.id
         DispatchQueue.main.async { focusedMark = mark.id }
     }
 
@@ -330,46 +355,48 @@ struct ContentView: View {
 private struct MarkEditor: View {
     @Binding var mark: ReviewMark
     let number: Int
-    let imageSize: (Int, Int)
     @FocusState.Binding var focusedMark: UUID?
     var onDelete: () -> Void
-    var onSelect: () -> Void
+    var onDone: () -> Void
+    var onTime: () -> Void
+    var onRemoveTime: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 7) {
-                Button(action: onSelect) {
-                    HStack(spacing: 6) {
-                        Text("\(number)").font(.caption.bold())
-                            .frame(width: 20, height: 20)
-                            .background(Color.accentColor.opacity(0.12), in: Circle())
-                        Text(mark.kind == .point ? "Comment" : mark.kind.rawValue)
-                            .font(.caption.weight(.medium))
-                        if let time = mark.time { Text(timeLabel(time)).font(.caption.monospacedDigit()) }
-                    }
-                }
-                .buttonStyle(.plain)
-                Spacer(minLength: 0)
-                Button(action: onDelete) { Image(systemName: "xmark").font(.caption2) }
-                    .buttonStyle(.plain).foregroundStyle(.secondary).accessibilityLabel("Delete comment")
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Comment \(number)").font(.system(size: 12, weight: .medium))
+                Spacer()
+                Button(action: onDelete) { Image(systemName: "trash") }
+                    .buttonStyle(.plain).foregroundStyle(.secondary).help("Delete comment")
+                Button("Done", action: onDone).buttonStyle(.borderless)
             }
             TextField("Write a comment…", text: $mark.note, axis: .vertical)
-                .lineLimit(2...8).textFieldStyle(.plain)
-                .font(.callout)
+                .lineLimit(2...4).textFieldStyle(.plain).font(.system(size: 13))
                 .focused($focusedMark, equals: mark.id)
-            if mark.kind == .measure,
-               let pixels = mark.distanceInPixels(width: imageSize.0, height: imageSize.1) {
-                Text("\(Int(pixels.rounded())) px").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                .onExitCommand(perform: onDone)
+            if let time = mark.time {
+                HStack(spacing: 6) {
+                    Button(action: onTime) {
+                        Label(mark.endTime.map { "\(preciseTime(time)) – \(preciseTime($0))" }
+                              ?? "\(preciseTime(time)) · Add time range", systemImage: "clock")
+                            .font(.system(size: 11).monospacedDigit())
+                    }.buttonStyle(.borderless)
+                    if mark.endTime != nil {
+                        Spacer(minLength: 0)
+                        Button(action: onRemoveTime) { Image(systemName: "xmark").font(.system(size: 9)) }
+                            .buttonStyle(.plain).help("Use a single frame")
+                    }
+                }
             }
         }
-        .padding(11)
-        .background(.white, in: RoundedRectangle(cornerRadius: 9))
-        .overlay(RoundedRectangle(cornerRadius: 9)
-            .stroke(focusedMark == mark.id ? Color.accentColor.opacity(0.6) : .black.opacity(0.08), lineWidth: 1))
+        .padding(14).frame(width: 248)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.black.opacity(0.08), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.12), radius: 14, y: 4)
     }
 }
 
-private struct ReviewCanvas: View {
+private struct ReviewCanvas<Editor: View>: View {
     let screenshot: NSImage?
     let player: AVPlayer?
     let aspect: CGSize
@@ -378,11 +405,14 @@ private struct ReviewCanvas: View {
     let currentTime: Double?
     let pixelSize: (Int, Int)
     let zoom: CGFloat
+    let activeMark: UUID?
     var onStart: () -> Void
     var onMark: (UnitPoint2D, UnitPoint2D?) -> Void
+    var onSelect: (UUID) -> Void
     var reference: NSImage? = nil
     var compare = false
     var comparisonFraction = 0.5
+    @ViewBuilder var editor: (ReviewMark) -> Editor
     @State private var draft: ReviewMark?
 
     var body: some View {
@@ -392,18 +422,28 @@ private struct ReviewCanvas: View {
                 ZStack(alignment: .topLeading) {
                     media(size: fitted)
                         .allowsHitTesting(false)
-                    MarksOverlay(marks: visibleMarks + (draft.map { [$0] } ?? []), pixelSize: pixelSize)
+                    MarksOverlay(marks: visibleMarks + (draft.map { [$0] } ?? []), pixelSize: pixelSize, numbers: Dictionary(uniqueKeysWithValues: marks.enumerated().map { ($0.element.id, $0.offset + 1) }))
                         .frame(width: fitted.width, height: fitted.height)
                         .allowsHitTesting(false)
                     if !compare {
                         AnnotationInputSurface(onStart: onStart, onChange: { start, end in
-                            draft = ReviewMark(kind: tool, start: start, end: endpoint(end),
+                            draft = ReviewMark(kind: tool == .point ? .focus : tool, start: start, end: endpoint(end),
                                                time: currentTime, note: "")
                         }, onFinish: { start, end in
                             draft = nil
-                            onMark(start, endpoint(end))
+                            if abs(start.x - end.x) * fitted.width < 5,
+                               abs(start.y - end.y) * fitted.height < 5,
+                               let existing = visibleMarks.last(where: { hit($0, at: start, size: fitted) }) {
+                                onSelect(existing.id)
+                            } else { onMark(start, endpoint(end)) }
                         })
                         .frame(width: fitted.width, height: fitted.height)
+                    }
+                }
+                .overlay(alignment: .topLeading) {
+                    if !compare, let mark = visibleMarks.first(where: { $0.id == activeMark }) {
+                        editor(mark)
+                            .offset(editorPosition(mark, size: fitted))
                     }
                 }
                 .frame(width: fitted.width, height: fitted.height)
@@ -414,7 +454,7 @@ private struct ReviewCanvas: View {
     }
 
     private func endpoint(_ point: UnitPoint2D) -> UnitPoint2D? {
-        [.point, .guideHorizontal, .guideVertical].contains(tool) ? nil : point
+        [.guideHorizontal, .guideVertical].contains(tool) ? nil : point
     }
 
     private func media(size: CGSize) -> some View {
@@ -437,12 +477,26 @@ private struct ReviewCanvas: View {
         }
     }
 
-    private var visibleMarks: [ReviewMark] {
-        guard let currentTime else { return marks }
-        return marks.filter { mark in
-            guard let time = mark.time else { return true }
-            return abs(time - currentTime) < 0.18
+    private var visibleMarks: [ReviewMark] { marks.filter { $0.isVisible(at: currentTime) } }
+
+    private func hit(_ mark: ReviewMark, at point: UnitPoint2D, size: CGSize) -> Bool {
+        let anchor = mark.kind == .focus ? UnitPoint2D(x: min(mark.start.x, mark.end?.x ?? mark.start.x),
+                                                       y: min(mark.start.y, mark.end?.y ?? mark.start.y)) :
+                     mark.kind == .move ? (mark.end ?? mark.start) : mark.start
+        if hypot((point.x - anchor.x) * size.width, (point.y - anchor.y) * size.height) < 14 { return true }
+        if mark.kind == .focus, let end = mark.end {
+            return point.x >= min(mark.start.x, end.x) && point.x <= max(mark.start.x, end.x)
+                && point.y >= min(mark.start.y, end.y) && point.y <= max(mark.start.y, end.y)
         }
+        return false
+    }
+
+    private func editorPosition(_ mark: ReviewMark, size: CGSize) -> CGSize {
+        let left = min(mark.start.x, mark.end?.x ?? mark.start.x) * size.width
+        let right = max(mark.start.x, mark.end?.x ?? mark.start.x) * size.width
+        let x = right + 290 < size.width ? right + 14 : left - 290
+        let y = min(mark.start.y, mark.end?.y ?? mark.start.y) * size.height
+        return CGSize(width: max(8, min(x, size.width - 284)), height: max(8, min(y, size.height - 190)))
     }
 
     private func fittedSize(in available: CGSize) -> CGSize {
@@ -474,42 +528,43 @@ private struct PlayerSurface: NSViewRepresentable {
 private struct MarksOverlay: View {
     let marks: [ReviewMark]
     let pixelSize: (Int, Int)
+    var numbers: [UUID: Int] = [:]
 
     var body: some View {
         Canvas { context, size in
             for (index, mark) in marks.enumerated() {
                 let start = point(mark.start, size)
                 let end = mark.end.map { point($0, size) }
-                let red = Color.red
+                let red = Color.blue
                 switch mark.kind {
                 case .point:
-                    badge(context: &context, at: start, number: index + 1)
+                    badge(context: &context, at: start, number: numbers[mark.id] ?? (index + 1))
                 case .guideHorizontal:
-                    stroke(&context, from: CGPoint(x: 0, y: start.y), to: CGPoint(x: size.width, y: start.y), color: .orange, dashed: true)
-                    context.draw(Text("H GUIDE").font(.system(size: 10, weight: .bold)).foregroundColor(.orange), at: CGPoint(x: 44, y: start.y - 9))
+                    stroke(&context, from: CGPoint(x: 0, y: start.y), to: CGPoint(x: size.width, y: start.y), color: .blue, dashed: true)
+                    context.draw(Text("H GUIDE").font(.system(size: 10, weight: .medium)).foregroundColor(.blue), at: CGPoint(x: 44, y: start.y - 9))
                 case .guideVertical:
-                    stroke(&context, from: CGPoint(x: start.x, y: 0), to: CGPoint(x: start.x, y: size.height), color: .orange, dashed: true)
-                    context.draw(Text("V GUIDE").font(.system(size: 10, weight: .bold)).foregroundColor(.orange), at: CGPoint(x: start.x + 28, y: 10))
+                    stroke(&context, from: CGPoint(x: start.x, y: 0), to: CGPoint(x: start.x, y: size.height), color: .blue, dashed: true)
+                    context.draw(Text("V GUIDE").font(.system(size: 10, weight: .medium)).foregroundColor(.blue), at: CGPoint(x: start.x + 28, y: 10))
                 case .focus:
                     if let end {
                         let rect = CGRect(x: min(start.x, end.x), y: min(start.y, end.y),
                                           width: abs(start.x - end.x), height: abs(start.y - end.y))
-                        context.fill(Path(rect), with: .color(.yellow.opacity(0.12)))
-                        context.stroke(Path(roundedRect: rect, cornerRadius: 5), with: .color(.yellow), lineWidth: 2)
-                        badge(context: &context, at: CGPoint(x: rect.minX, y: rect.minY), number: index + 1)
+                        context.fill(Path(rect), with: .color(.blue.opacity(0.04)))
+                        context.stroke(Path(roundedRect: rect, cornerRadius: 5), with: .color(.blue), lineWidth: 1.25)
+                        badge(context: &context, at: CGPoint(x: rect.minX, y: rect.minY), number: numbers[mark.id] ?? (index + 1))
                     }
                 case .move:
                     if let end {
                         stroke(&context, from: start, to: end, color: .green, dashed: true)
-                        context.stroke(Path(ellipseIn: CGRect(x: start.x - 9, y: start.y - 9, width: 18, height: 18)), with: .color(.red), lineWidth: 2)
-                        context.stroke(Path(ellipseIn: CGRect(x: end.x - 10, y: end.y - 10, width: 20, height: 20)), with: .color(.green), lineWidth: 3)
-                        badge(context: &context, at: end, number: index + 1)
+                        context.stroke(Path(ellipseIn: CGRect(x: start.x - 9, y: start.y - 9, width: 18, height: 18)), with: .color(.blue), lineWidth: 1.25)
+                        context.stroke(Path(ellipseIn: CGRect(x: end.x - 10, y: end.y - 10, width: 20, height: 20)), with: .color(.green), lineWidth: 1.25)
+                        badge(context: &context, at: end, number: numbers[mark.id] ?? (index + 1))
                     }
                 case .arrow:
                     if let end {
                         stroke(&context, from: start, to: end, color: red)
                         arrowHead(&context, from: start, to: end)
-                        badge(context: &context, at: start, number: index + 1)
+                        badge(context: &context, at: start, number: numbers[mark.id] ?? (index + 1))
                     }
                 case .measure:
                     if let end {
@@ -521,14 +576,14 @@ private struct MarksOverlay: View {
                     if let end {
                         stroke(&context, from: start, to: end, color: .cyan)
                         endpoint(&context, at: start); endpoint(&context, at: end)
-                        context.draw(Text("A").font(.system(size: 12, weight: .bold)).foregroundColor(.cyan), at: midpoint(start, end))
+                        context.draw(Text("A").font(.system(size: 12, weight: .medium)).foregroundColor(.cyan), at: midpoint(start, end))
                     }
                     if let secondStart = mark.secondStart.map({ point($0, size) }),
                        let secondEnd = mark.secondEnd.map({ point($0, size) }) {
                         stroke(&context, from: secondStart, to: secondEnd, color: .purple)
                         endpoint(&context, at: secondStart); endpoint(&context, at: secondEnd)
-                        context.draw(Text("B").font(.system(size: 12, weight: .bold)).foregroundColor(.purple), at: midpoint(secondStart, secondEnd))
-                        badge(context: &context, at: start, number: index + 1)
+                        context.draw(Text("B").font(.system(size: 12, weight: .medium)).foregroundColor(.purple), at: midpoint(secondStart, secondEnd))
+                        badge(context: &context, at: start, number: numbers[mark.id] ?? (index + 1))
                     }
                 }
             }
@@ -540,20 +595,22 @@ private struct MarksOverlay: View {
     }
     private func stroke(_ context: inout GraphicsContext, from: CGPoint, to: CGPoint, color: Color, dashed: Bool = false) {
         var path = Path(); path.move(to: from); path.addLine(to: to)
-        context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: 2.5, lineCap: .round, dash: dashed ? [7, 5] : []))
+        context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: 1.25, lineCap: .round, dash: dashed ? [4, 4] : []))
     }
     private func endpoint(_ context: inout GraphicsContext, at point: CGPoint) {
-        context.fill(Path(ellipseIn: CGRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8)), with: .color(.red))
+        context.fill(Path(ellipseIn: CGRect(x: point.x - 2, y: point.y - 2, width: 4, height: 4)), with: .color(.blue))
     }
     private func badge(context: inout GraphicsContext, at point: CGPoint, number: Int) {
-        context.fill(Path(ellipseIn: CGRect(x: point.x - 12, y: point.y - 12, width: 24, height: 24)), with: .color(.red))
-        context.draw(Text("\(number)").font(.system(size: 12, weight: .bold)).foregroundColor(.white), at: point)
+        let circle = Path(ellipseIn: CGRect(x: point.x - 8, y: point.y - 8, width: 16, height: 16))
+        context.fill(circle, with: .color(.white))
+        context.stroke(circle, with: .color(.blue), lineWidth: 1)
+        context.draw(Text("\(number)").font(.system(size: 10, weight: .medium)).foregroundColor(.blue), at: point)
     }
     private func arrowHead(_ context: inout GraphicsContext, from start: CGPoint, to end: CGPoint) {
         let angle = atan2(end.y - start.y, end.x - start.x)
-        let left = CGPoint(x: end.x - cos(angle - .pi / 6) * 12, y: end.y - sin(angle - .pi / 6) * 12)
-        let right = CGPoint(x: end.x - cos(angle + .pi / 6) * 12, y: end.y - sin(angle + .pi / 6) * 12)
-        stroke(&context, from: left, to: end, color: .red); stroke(&context, from: end, to: right, color: .red)
+        let left = CGPoint(x: end.x - cos(angle - .pi / 6) * 8, y: end.y - sin(angle - .pi / 6) * 8)
+        let right = CGPoint(x: end.x - cos(angle + .pi / 6) * 8, y: end.y - sin(angle + .pi / 6) * 8)
+        stroke(&context, from: left, to: end, color: .blue); stroke(&context, from: end, to: right, color: .blue)
     }
     private func midpoint(_ a: CGPoint, _ b: CGPoint) -> CGPoint { CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2) }
     private func measureLabel(_ context: inout GraphicsContext, start: CGPoint, end: CGPoint, mark: ReviewMark) {
@@ -561,13 +618,14 @@ private struct MarksOverlay: View {
         let pixelDY = (mark.end?.y ?? mark.start.y) - mark.start.y
         let dx = pixelDX * Double(pixelSize.0)
         let dy = pixelDY * Double(pixelSize.1)
-        let label = Text("\(Int(hypot(dx, dy).rounded())) px").font(.system(size: 12, weight: .bold, design: .rounded)).foregroundColor(.white)
+        let label = Text("\(Int(hypot(dx, dy).rounded())) px").font(.system(size: 12, weight: .medium, design: .rounded)).foregroundColor(.blue)
         let location = midpoint(start, end)
         let labelSize = context.resolve(label).measure(in: CGSize(width: 180, height: 30))
         let background = CGRect(x: location.x - labelSize.width / 2 - 7,
                                 y: location.y - labelSize.height / 2 - 4,
                                 width: labelSize.width + 14, height: labelSize.height + 8)
-        context.fill(Path(roundedRect: background, cornerRadius: 5), with: .color(.red))
+        context.fill(Path(roundedRect: background, cornerRadius: 5), with: .color(.white))
+        context.stroke(Path(roundedRect: background, cornerRadius: 5), with: .color(.blue.opacity(0.25)), lineWidth: 0.5)
         context.draw(label, at: location)
     }
 }
@@ -592,7 +650,7 @@ private func imagePixelSize(_ image: NSImage) -> (Int, Int) {
 
 private func instruction(for kind: MarkKind) -> String {
     switch kind {
-    case .point: "Click an element to pin a note."
+    case .point: "Drag to select an area, or click to leave a comment."
     case .arrow: "Drag an arrow toward the detail you mean."
     case .measure: "Drag across a gap to see its size in screenshot pixels."
     case .guideHorizontal: "Click once to place a horizontal guide across the screen."
@@ -614,4 +672,8 @@ private func measureDirection(_ mark: ReviewMark, imageSize: (Int, Int)) -> Stri
 private func timeLabel(_ seconds: Double) -> String {
     let wholeSeconds = max(0, Int(seconds.rounded(.down)))
     return String(format: "%d:%02d", wholeSeconds / 60, wholeSeconds % 60)
+}
+
+private func preciseTime(_ seconds: Double) -> String {
+    String(format: "%d:%04.1f", Int(max(0, seconds)) / 60, max(0, seconds).truncatingRemainder(dividingBy: 60))
 }
