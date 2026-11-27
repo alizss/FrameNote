@@ -1,59 +1,52 @@
 # FrameNote
 
-FrameNote is an open-source macOS app for giving clear visual feedback on UI work. Record an interaction or open a screenshot, mark the exact place and moment, and send the evidence to a designer, developer, or coding agent. It is an independent project with no dependency on CloudClip.
+Turn a visual reference into a brief for Codex or another coding AI.
 
-## Try it
+1. Paste a public social-post or media URL and press **Analyze reference**. You can also open, paste, or drop an image, GIF, or video.
+2. FrameNote imports the media and starts analysis. Connect your AI provider on first use.
+3. Review the visible text and timestamped images, then click **Copy for AI**.
 
-Requires macOS 14 or later and Xcode command-line tools.
+The copy preview shows the exact text and evidence images sent to the clipboard. Evidence prepares in the background; Copy for AI becomes available when it is ready. Some receiving apps accept only text; drag the visible image previews into those apps. No sharing dropdown is needed.
+
+## Links
+
+Public social-video imports use [yt-dlp](https://github.com/yt-dlp/yt-dlp), installed separately:
 
 ```sh
+brew install yt-dlp
+```
+
+FrameNote looks in Homebrew and `~/.local/bin`. It downloads one video, with a 200 MB limit and a two-minute timeout. No browser cookies or account credentials are read. Private, restricted, deleted, or site-blocked posts can fail. Direct images/videos and pages exposing media use the built-in importer. GIFs become playable clips.
+
+## Analysis
+
+Connect Codex CLI, Claude Code CLI, OpenAI, Anthropic, or an image-capable OpenAI-compatible endpoint in Settings. Account modes use the official installed CLI and its existing login. API keys are stored in Keychain.
+
+Analysis sends sampled frames through the selected provider. It does not hear audio or inspect continuous motion; inferred timing and measurements are estimates. Links alone cannot guarantee that the receiving AI can see the media, so attach evidence when needed.
+
+Local interactions target feedback within 150 ms. Network downloads, AI analysis, and evidence export take longer and show progress. This is a target, not a guarantee for every device or operation.
+
+## Optional tools
+
+FrameNote starts in the menu bar. Hover or click its icon to open the compact importer. The review uses a single header and a flat surface. Settings remain in the importer.
+
+**Recent** is available in the launcher and review header. Search saved references by title or notes, then click one to reopen its media, annotations, and analysis. References save automatically on this Mac; opening another reference preserves the previous one. The latest draft from older versions is carried into Recent, but previously overwritten drafts cannot be recovered.
+
+Working drafts live in `~/Library/Application Support/FrameNote/Draft`; imported sources and prepared exports live alongside them. Nothing uploads until analysis or sharing is requested.
+
+## Develop
+
+Requires macOS 14+ and Xcode command-line tools.
+
+```sh
+swift build
+swift test --scratch-path /private/tmp/framenote-spm -j 2
 ./build.sh
 open ~/Applications/FrameNote.app
 ```
 
-1. Click **Record** to capture the primary display, or open a screenshot, image, or video. FrameNote’s own windows are excluded from screen recordings. Recording captures video only; it does not record audio.
-2. Pause where the issue appears. With **Comment** selected, drag a box around the relevant area (or click a point), then type in the small comment card beside it. **Done** closes the card; click the marked area or use the comments menu to reopen it.
-3. To comment on motion, choose **Select time** and drag across the playback bar. Drag either blue handle to adjust the start or end. This attaches the range to the open comment, or creates a new one. You can select time first and then draw an area before typing. The annotation stays visible throughout its time range. The repeat button loops three seconds around the playhead.
-4. Click **Share feedback** to export the original recording or image, marked moments, notes, and a structured JSON report. After exporting, **Copy for agent** copies a paste-ready summary with the evidence folder path.
+`build.sh` installs at `~/Applications/FrameNote.app` and links it in the repository. It uses an Apple Development signing identity if available; otherwise ad-hoc signing. Built with SwiftUI, AppKit, AVFoundation, and ScreenCaptureKit.
 
-Capture controls stay in a small floating widget. Stop opens a larger review in the same floating window: drag an edge to resize it, use the magnifiers to zoom, and comment directly beside your selection. There is no permanent sidebar. Drag the header to move the window. The collapse button returns to the small widget without losing the current review.
+Live import tests are opt-in: set `FRAMENOTE_TEST_SOCIAL_URL` or `FRAMENOTE_TEST_VIDEO_URL` when running tests.
 
-FrameNote also lives in the macOS menu bar. Click its viewfinder icon to show or hide the widget. The widget's × button hides it and keeps the current review in memory; right-click the menu-bar icon for **Quit FrameNote**.
-
-The tools are:
-
-- **Comment:** drag to select an area or click an element, then type. Video comments can cover one frame or a time range.
-- **Guide:** place a full-screen horizontal or vertical alignment line with one click.
-- **Measure gap:** drag between two points to see the distance in screenshot pixels.
-- **Compare gaps:** drag across gap A, then gap B. FrameNote reports both sizes and their difference.
-- **Move here:** drag from the current position to the intended position.
-- **Focus area:** draw a box around the relevant area.
-- **Arrow:** point toward a detail.
-
-Reviews stay on your Mac until you choose to share them. FrameNote does not upload recordings or read clipboard history. Measurements use image pixels; Retina pixels may differ from layout points in source code.
-
-## What gets exported
-
-The timestamped review folder includes:
-
-- `recording.mov` (or the original video filename) when reviewing video
-- `screenshot.png` and `annotated.png` as a poster frame for clips or the original screenshot and its annotations for still reviews
-- A `moment-XX.png` and `moment-XX-marked.png` pair for each video note, plus a `focus` crop when that note uses **Focus area**
-- A `focus-XX.png` crop for each still image focus note
-- `feedback.md` with comments, locations, measured gaps, and timestamps or time ranges
-- `feedback.json` with normalized coordinates, start/end times, mark types, and loop bounds
-- `reference.png` when a before image is provided
-
-## Development
-
-```sh
-swift build
-swift test --scratch-path /private/tmp/framenote-spm -j 1
-./build.sh
-```
-
-The app uses SwiftUI, AppKit, AVFoundation, and ScreenCaptureKit with no third-party packages. `build.sh` installs the app at `~/Applications/FrameNote.app` and links it as `FrameNote.app` in the repository root. When an Apple Development signing identity is available, the build uses it so macOS can keep Screen Recording consent across rebuilds; set `FRAMENOTE_SIGNING_IDENTITY` to select a specific identity. Without one, it falls back to ad-hoc signing, which may cause macOS to ask for Screen Recording permission again after rebuilds. The source project lives in this repository; the runnable app lives outside the synced Documents folder because Finder metadata there can invalidate macOS code signing. The build uses a temporary directory for the same reason.
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).

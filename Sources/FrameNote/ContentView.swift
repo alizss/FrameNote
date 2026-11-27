@@ -7,266 +7,792 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @StateObject private var store: ReviewStore
     @FocusState private var focusedMark: UUID?
-    @State private var collapsed = false
+    @State private var importing = false
+    @State private var showingLibrary = false
+    @State private var importTask: Task<Void, Never>?
     @State private var zoom: CGFloat = 1
     @State private var activeMark: UUID?
     @State private var selectingTime = false
+    @State private var detailedEditing = false
+    @AppStorage("reviewCommentsOpen") private var commentsOpen = true
+    @AppStorage("reviewDetailsOpen") private var reviewDetailsOpen = false
+    @AppStorage("layout.sidebarWidth") private var sidebarWidthValue = 268.0
+    @AppStorage("layout.density") private var density: WorkspaceDensity = .compact
+    @AppStorage("layout.advancedTools") private var advancedTools = false
+    @AppStorage("layout.hideEmptyComments") private var hideEmptyComments = true
+    @AppStorage("layout.showHints") private var showHints = false
+    @AppStorage("layout.resetGeneration") private var layoutResetGeneration = 0
+    @AppStorage("appearance.cornerRadius") private var cornerRadius = 12.0
+    @State private var showEmptySidebar = false
+    private var sidebarWidth: CGFloat {
+        get { CGFloat(sidebarWidthValue) }
+        nonmutating set { sidebarWidthValue = Double(newValue) }
+    }
+    private var commentsVisible: Bool { commentsOpen && (!hideEmptyComments || !store.marks.isEmpty || showEmptySidebar) }
+    @State private var sidebarDragWidth: CGFloat?
+    @State private var logoHovered = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var zoomCenter = UnitPoint2D(x: 0.5, y: 0.5)
+    @State private var selectingZoom = false
+    @State private var showingLauncher: Bool
+    @AppStorage("appearance.theme") private var theme: FrameNoteTheme = .light
+    @State private var settingsSection: SettingsSection = .appearance
+    @State private var showAPISettings = false
+    @State private var pendingAnalysisMarkID: UUID?
+    @State private var showInspirationImport = false
+    @State private var pasteOnImport = false
+    @State private var focusAnimation: Task<Void, Never>?
+    private let automaticallyFocusComments: Bool
 
-    init(store: ReviewStore = ReviewStore()) {
+    init(store: ReviewStore = ReviewStore(restoreSavedDraft: true), automaticallyFocusComments: Bool = true, detailedEditing: Bool = false) {
+        self.automaticallyFocusComments = automaticallyFocusComments
+        _detailedEditing = State(initialValue: detailedEditing)
         _store = StateObject(wrappedValue: store)
+        _showingLauncher = State(initialValue: store.screenshot == nil && store.videoURL == nil)
     }
 
     private var hasReviewContent: Bool { store.screenshot != nil || store.videoURL != nil }
-    private var isReviewing: Bool { hasReviewContent && !store.isRecording && !collapsed }
+    private var isReviewing: Bool { (hasReviewContent || showingLibrary) && !store.isRecording && (!showingLauncher || showingLibrary) }
+    private var presentation: FrameNotePresentation { store.isRecording ? .recording : isReviewing ? .review : .launcher }
     private var pixelSize: (Int, Int) {
         if let image = store.screenshot { return imagePixelSize(image) }
         return (Int(store.videoSize.width), Int(store.videoSize.height))
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            header
+        VStack(spacing: density.spacing) {
+            if !store.isRecording && (!isReviewing || detailedEditing) { header }
             if store.isRecording {
                 recordingControls
+            } else if showingLibrary {
+                ReviewLibraryView(store: store, onClose: { showingLibrary = false })
             } else if isReviewing {
                 reviewWorkspace
-            } else if hasReviewContent {
-                Button { collapsed = false } label: {
-                    Label("Open review", systemImage: "arrow.up.left.and.arrow.down.right")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent).controlSize(.large)
-                Text("Your recording and comments are still here.")
-                    .font(.caption).foregroundStyle(.secondary)
             } else {
                 idleControls
             }
         }
-        .padding(14)
+        .padding(.horizontal, store.isRecording ? 12 : density.padding)
+        .padding(.bottom, store.isRecording ? 12 : density.padding)
+        .padding(.top, isReviewing && !detailedEditing ? 0 : store.isRecording ? 12 : density.padding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.black.opacity(0.1), lineWidth: 1))
-        .preferredColorScheme(.light)
-        .onChange(of: isReviewing, initial: true) { _, reviewing in
-            NSApp.windows.compactMap { $0 as? FloatingPanel }.first?.setReviewMode(reviewing)
+        .modifier(FrameNoteSurface(theme: theme, compact: !isReviewing))
+        .ignoresSafeArea(.container, edges: isReviewing ? .top : [])
+        .preferredColorScheme(theme.scheme)
+        .onChange(of: presentation, initial: true) { _, mode in
+            NSApp.windows.compactMap { $0 as? FloatingPanel }.first?.setPresentation(mode)
         }
-        .onChange(of: store.videoURL) { _, _ in collapsed = false; zoom = 1; store.tool = .point }
-        .onChange(of: store.screenshot) { _, _ in collapsed = false; zoom = 1; store.tool = .point }
+        .onChange(of: theme, initial: true) { _, _ in updateWindowAppearance() }
+        .onReceive(NotificationCenter.default.publisher(for: .frameNoteShowLauncher)) { _ in
+            guard !store.isRecording else { return }
+            store.pauseForAnnotation(); focusedMark = nil; showingLibrary = false; showingLauncher = true
+        }
+        .onChange(of: store.openedReviewGeneration) { _, _ in showingLauncher = false }
+        .onChange(of: store.isRecording) { _, recording in if recording { showingLauncher = false } }
+        .onChange(of: store.videoURL) { _, _ in focusAnimation?.cancel(); zoom = 1; store.tool = .point }
+        .onChange(of: store.screenshot) { _, _ in focusAnimation?.cancel(); zoom = 1; store.tool = .point }
+        .sheet(isPresented: $showAPISettings) { apiSettings }
+        .sheet(isPresented: $showInspirationImport) {
+            InspirationImportView(store: store, pasteOnOpen: pasteOnImport, onImported: { referenceImported() })
+        }
+        .background {
+            Button("Paste media") { pasteReference() }
+                .keyboardShortcut("v", modifiers: .command)
+                .disabled(focusedMark != nil || showAPISettings || showInspirationImport || showingLibrary)
+                .hidden()
+        }
+        .onDisappear { focusAnimation?.cancel() }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let url = urls.first, !importing else { return false }
+            startImport(url); return true
+        }
+        .onChange(of: layoutResetGeneration) { _, _ in showEmptySidebar = false }
+        .onChange(of: store.marks.map(\.id)) { _, ids in
+            if let activeMark, !ids.contains(activeMark) { self.activeMark = nil; focusedMark = nil }
+        }
+        .onDeleteCommand { removeSelectedMark() }
     }
 
     private var header: some View {
         HStack(spacing: 12) {
-            WindowDragHandle()
-                .overlay(alignment: .leading) {
-                    HStack(spacing: 7) {
-                        Image(systemName: store.isRecording ? "record.circle.fill" : "viewfinder")
-                            .foregroundStyle(store.isRecording ? Color.red : Color.accentColor)
-                        Text("FrameNote").font(.headline)
-                    }
-                    .allowsHitTesting(false)
-                }
-                .help("Drag to move FrameNote")
-            if hasReviewContent && !store.isRecording {
-                Menu {
-                    Button("Record new clip", systemImage: "record.circle") { store.toggleRecording() }
-                    Button("Capture a window…", systemImage: "macwindow") { store.captureWindow() }
-                    Button("Open screenshot or clip…", systemImage: "folder") { importMedia() }
-                    Divider()
-                    Button("Add before image…", systemImage: "rectangle.split.2x1") { store.importReference() }
-                    if store.lastExport != nil {
-                        Button("Show exported files", systemImage: "folder") { store.revealExport() }
-                    }
-                } label: {
-                    Image(systemName: "ellipsis").frame(width: 22, height: 24)
-                }
-                .menuStyle(.borderlessButton).fixedSize()
-                .help("New capture and more actions")
-            }
+            brandIcon
             if isReviewing {
-                Button { store.export() } label: {
-                    Label("Share feedback", systemImage: "square.and.arrow.up")
-                }
-                .buttonStyle(.borderedProminent)
-                Button { collapsed = true } label: {
-                    Image(systemName: "arrow.down.right.and.arrow.up.left").frame(width: 22, height: 24)
-                }
-                .buttonStyle(.plain).help("Collapse to small widget")
+                Button { store.pauseForAnnotation(); focusedMark = nil; showingLauncher = true } label: {
+                    Label("Start", systemImage: "chevron.left")
+                }.buttonStyle(.borderless).font(.caption)
+            } else {
+                Text("FrameNote").font(.system(size: 13, weight: .semibold))
             }
-            Button { (NSApp.delegate as? FrameNoteAppDelegate)?.hideWidget(nil) } label: {
-                Image(systemName: "xmark").frame(width: 22, height: 24)
+            WindowDragHandle().frame(height: 26).help("Drag to move FrameNote")
+            if isReviewing && detailedEditing {
+                Button("Done editing") {
+                    store.pauseForAnnotation()
+                    detailedEditing.toggle()
+                }.buttonStyle(.borderless).font(.caption)
             }
-            .buttonStyle(.plain).foregroundStyle(.secondary).help("Hide widget — reopen from the menu bar")
+            headerUtilities
         }
-        .frame(height: 26)
+        .frame(height: 30)
+        .modifier(FrameNoteChrome())
+    }
+
+    private var brandIcon: some View {
+        WindowDragHandle()
+            .overlay {
+                Image(systemName: store.isRecording ? "record.circle.fill" : "viewfinder")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(store.isRecording ? Color.red : Color.accentColor)
+                    .frame(width: 26, height: 26)
+                    .background(Color.accentColor.opacity(logoHovered ? 0.1 : 0), in: RoundedRectangle(cornerRadius: 8))
+                    .allowsHitTesting(false)
+            }
+            .frame(width: 26, height: 26)
+            .onHover { logoHovered = $0 }
+            .accessibilityLabel("FrameNote")
+            .help("FrameNote · drag to move")
+    }
+
+    @ViewBuilder private var headerUtilities: some View {
+        libraryButton
+        if isReviewing {
+            Button { settingsSection = .appearance; showAPISettings = true } label: {
+                Label("Settings", systemImage: "gearshape")
+            }
+            .buttonStyle(.borderless).font(.caption).fixedSize()
+            .help("Appearance, workspace, and AI connections").accessibilityLabel("Settings")
+        } else {
+            Button { settingsSection = .appearance; showAPISettings = true } label: {
+                Image(systemName: "gearshape").frame(width: 24, height: 24)
+            }.buttonStyle(.plain).foregroundStyle(.secondary).help("Settings & appearance")
+            Button { (NSApp.delegate as? FrameNoteAppDelegate)?.hideWidget(nil) } label: {
+                Image(systemName: "xmark").frame(width: 26, height: 26)
+            }
+            .buttonStyle(.plain).foregroundStyle(.secondary).help("Hide FrameNote — reopen from the menu bar")
+        }
+    }
+
+    private var libraryButton: some View {
+        Button {
+            store.pauseForAnnotation()
+            showingLibrary = true
+        } label: { Label("Recent", systemImage: "clock.arrow.circlepath") }
+            .buttonStyle(.borderless).font(.callout)
+            .disabled(importing || store.isCapturing || store.isRecording)
+            .help("Open a previous reference")
     }
 
     private var idleControls: some View {
-        VStack(spacing: 9) {
-            Button { store.toggleRecording() } label: {
-                Label("Record screen", systemImage: "record.circle.fill").frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent).tint(.red).controlSize(.large)
-            .disabled(store.isCapturing)
-            HStack {
-                Button("Capture", systemImage: "macwindow") { store.captureWindow() }
-                    .disabled(store.isCapturing)
-                Spacer()
-                Button("Open", systemImage: "folder") { importMedia() }
-            }
-            .buttonStyle(.borderless).font(.callout)
-            Text(store.status == "Choose a screenshot or capture a window to start."
-                 ? "Always on top · drag the header to move" : store.status)
-                .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
-        }
+        StartPanelView(store: store, onContinue: { showEmptySidebar = false; showingLauncher = false }, onOpen: importMedia,
+                       onPaste: pasteReference,
+                       onImport: { startImport($0) }, importing: importing,
+                       onCancel: { importTask?.cancel() })
     }
 
     private var recordingControls: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Circle().fill(.red).frame(width: 9, height: 9)
-                Text(store.isCapturing ? "Saving recording…" : "Recording")
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Button("Stop", systemImage: "stop.fill") { store.toggleRecording() }
-                    .buttonStyle(.borderedProminent).tint(.red).disabled(store.isCapturing)
-            }
-            Text("FrameNote stays out of the recording.")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-        .padding(.top, 4)
+        RecordingWidgetView(store: store, onHide: { (NSApp.delegate as? FrameNoteAppDelegate)?.hideWidget(nil) })
     }
 
-    private var reviewWorkspace: some View {
-        VStack(spacing: 10) {
+    private func updateWindowAppearance() {
+        let appearance: NSAppearance?
+        switch theme {
+        case .light: appearance = NSAppearance(named: .aqua)
+        case .dark: appearance = NSAppearance(named: .darkAqua)
+        default: appearance = nil
+        }
+        NSApp.windows.compactMap { $0 as? FloatingPanel }.first?.appearance = appearance
+    }
+
+    @ViewBuilder private var reviewWorkspace: some View {
+        if detailedEditing { detailedWorkspace }
+        else { inspirationWorkspace }
+    }
+
+    private var inspirationWorkspace: some View {
+        VStack(spacing: 16) {
+            HStack(spacing: 12) {
+                Button {
+                    store.pauseForAnnotation()
+                    showingLauncher = true
+                } label: {
+                    Label("New reference", systemImage: "chevron.left")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .buttonStyle(.borderless)
+                .keyboardShortcut("[", modifiers: .command)
+                .help("Back to links and files")
+
+                WindowDragHandle().frame(maxWidth: .infinity, minHeight: 28)
+                    .accessibilityHidden(true)
+
+                libraryButton
+
+                Button {
+                    let id = store.ensureWholeReview()
+                    analyze(id)
+                } label: {
+                    Text(store.analyzingMarkIDs.isEmpty ? "Analyze" : "Analyzing…")
+                }
+                .buttonStyle(.bordered)
+                .disabled(!store.analyzingMarkIDs.isEmpty || (store.videoURL != nil && store.duration <= 0))
+                Button { Task { await store.copyPreviewForAI() } } label: {
+                    Label(store.isCopyingForAI ? "Copying…" : "Copy for AI", systemImage: "doc.on.doc")
+                }.buttonStyle(.borderedProminent)
+                    .disabled(store.lastExport == nil || store.isCopyingForAI)
+            }
+            .controlSize(.small)
+            .frame(height: 28)
+            // This row shares the native title bar; leave its traffic lights clear.
+            .padding(.leading, 76)
+            HStack(alignment: .top, spacing: 20) {
+                VStack(spacing: 12) {
+                    Group {
+                        if let player = store.player {
+                            VideoPlayer(player: player)
+                        } else if let screenshot = store.screenshot {
+                            Image(nsImage: screenshot).resizable().scaledToFit()
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(nsColor: .underPageBackgroundColor))
+                     .clipped()
+                    CopyEvidencePreview(store: store)
+                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        Text("What caught your eye?").font(.headline)
+                        TextField("Optional: the transition, layout, or a detail to adapt…",
+                                  text: referenceNote, axis: .vertical)
+                            .textFieldStyle(.roundedBorder).lineLimit(3...8)
+                            .disabled(!store.analyzingMarkIDs.isEmpty)
+                        Divider()
+                        Text("Text included in copy").font(.headline)
+                        Text(store.implementationBrief).font(.system(size: 13))
+                            .lineSpacing(4).textSelection(.enabled)
+                        if let error = store.analysisErrors.values.first {
+                            Text(error).font(.caption).foregroundStyle(.red)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.trailing, 4)
+                }.frame(width: 330)
+            }
+            Text(store.status).font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading).lineLimit(2)
+        }
+        .onAppear { _ = store.ensureWholeReview() }
+        .task(id: store.reviewRevision) {
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+            guard !Task.isCancelled else { return }
+            await store.prepareFeedback(fullExport: false)
+        }
+    }
+
+    private var referenceNote: Binding<String> {
+        Binding(get: {
+            store.marks.first(where: { $0.wholeMedia == true && $0.aiGenerated != true })?.note ?? ""
+        }, set: { value in
+            let id = store.ensureWholeReview()
+            if let index = store.marks.firstIndex(where: { $0.id == id }) {
+                store.marks[index].note = value
+            }
+        })
+    }
+
+    private var detailedWorkspace: some View {
+        VStack(spacing: density.spacing) {
             annotationTools
             Divider()
-            ReviewCanvas(
-                screenshot: store.screenshot, player: store.player,
-                aspect: store.screenshot?.size ?? store.videoSize,
-                marks: store.marks + (store.pendingGapPreview.map { [$0] } ?? []),
-                tool: store.tool, currentTime: store.videoURL == nil ? nil : store.currentTime,
-                pixelSize: pixelSize, zoom: zoom, activeMark: activeMark,
-                onStart: store.pauseForAnnotation, onMark: addMark, onSelect: selectMark,
-                reference: store.reference, compare: store.compare,
-                comparisonFraction: store.comparisonFraction,
-                editor: { mark in commentEditor(for: mark) }
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            if store.player != nil { playbackControls }
-            if store.compare, store.reference != nil {
-                Slider(value: $store.comparisonFraction, in: 0...1)
-            }
-            HStack {
-                Text(selectingTime ? "Drag across the timeline to select a moment." :
-                     store.pendingGapPreview != nil ? "Gap A marked. Drag across gap B." : instruction(for: store.tool))
-                    .font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                if store.lastExport != nil {
-                    Button("Copy for agent") { store.copyForAgent() }.buttonStyle(.borderless)
+            HStack(spacing: 0) {
+                ReviewCanvas(
+                    screenshot: store.screenshot, player: store.player,
+                    aspect: store.screenshot?.size ?? store.videoSize,
+                    marks: store.marks + (store.pendingGapPreview.map { [$0] } ?? []),
+                    wireframe: store.showWireframe ? store.layoutOverlay : nil,
+                    tool: store.tool, currentTime: store.videoURL == nil ? nil : store.currentTime,
+                    pixelSize: pixelSize, zoom: zoom, zoomCenter: zoomCenter, selectingZoom: selectingZoom,
+                    activeMark: activeMark, editableIDs: Set(store.marks.map(\.id)),
+                    onStart: { focusAnimation?.cancel(); store.pauseForAnnotation() }, onMark: addMark, onSelect: selectMark,
+                    onEdit: { edited in
+                        if let index = store.marks.firstIndex(where: { $0.id == edited.id }) { store.marks[index] = edited }
+                    },
+                    onZoom: zoomToArea, onZoomFactor: zoomBy
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+                if commentsVisible {
+                    Rectangle().fill(Color.secondary.opacity(0.15)).frame(width: 1)
+                        .padding(.horizontal, 10).contentShape(Rectangle())
+                        .gesture(DragGesture().onChanged { value in
+                            if sidebarDragWidth == nil { sidebarDragWidth = sidebarWidth }
+                            sidebarWidth = min(420, max(220, (sidebarDragWidth ?? sidebarWidth) - value.translation.width))
+                        }.onEnded { _ in sidebarDragWidth = nil })
+                        .help("Drag to resize comments")
+                    commentsPanel.frame(width: sidebarWidth)
                 }
             }
-            if store.status.contains("failed") || store.status.hasPrefix("Exported") {
-                Text(store.status).font(.caption).foregroundStyle(.secondary)
+            if store.player != nil { playbackControls }
+            sharingBar
+            if reviewDetailsOpen {
+                VStack(spacing: 8) {
+                    if !store.marks.isEmpty { commentTrack }
+                    FeedbackShareView(store: store, showCopyControls: false)
+                }.transition(.opacity)
             }
+            if showHints {
+                HStack {
+                    Text(selectingZoom ? "Draw an area to zoom in." : selectingTime ? "Drag across the timeline to select a range." : instruction(for: store.tool))
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer()
+                    Text("Pinch to zoom · scroll to pan").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if store.status.hasPrefix("Could not") || store.status.contains("failed") {
+                Text(store.status).font(.caption).foregroundStyle(.red)
+            }
+        }
+        .task(id: reviewDetailsOpen ? store.reviewRevision : -1) {
+            guard reviewDetailsOpen else { return }
+            do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+            guard !Task.isCancelled else { return }
+            await store.prepareFeedback()
         }
     }
 
     private var annotationTools: some View {
-        HStack(spacing: 6) {
-            toolButton(.point, title: "Comment")
-            toolButton(.arrow, title: "Arrow")
-            toolButton(.measure, title: "Measure")
-            Menu {
-                Button("Horizontal guide") { store.tool = .guideHorizontal }
-                Button("Vertical guide") { store.tool = .guideVertical }
-            } label: {
-                Label("Guides", systemImage: "line.3.horizontal")
-                    .padding(.horizontal, 8).padding(.vertical, 7)
-                    .background(isGuide ? Color.accentColor.opacity(0.12) : .clear,
-                                in: RoundedRectangle(cornerRadius: 6))
+        VStack(alignment: .leading, spacing: density.spacing) {
+            HStack(spacing: 4) {
+                primaryTools
+                if !advancedTools {
+                    Menu {
+                        Button("Move here", systemImage: "arrow.up.right.and.arrow.down.left") { store.tool = .move }
+                        Button("Measure", systemImage: "ruler") { store.tool = .measure }
+                        Button("Compare gaps", systemImage: "equal") { store.tool = .compareGaps }
+                        Button("Horizontal guide", systemImage: "line.3.horizontal") { store.tool = .guideHorizontal }
+                        Button("Vertical guide", systemImage: "line.3.horizontal") { store.tool = .guideVertical }
+                        Divider()
+                        Button("Auto-annotate", systemImage: "wand.and.stars") { runAutoAnnotate() }
+                            .disabled(store.isAutoAnnotating)
+                    } label: { Text("More tools") }
+                    .menuStyle(.borderlessButton).fixedSize().padding(.horizontal, 6)
+                }
+                Spacer(minLength: 8)
+                analysisButton
             }
-            .menuStyle(.borderlessButton).fixedSize()
-            Menu {
-                Button("Focus area") { store.tool = .focus }
-                Button("Move here") { store.tool = .move }
-                Button("Compare gaps") { store.tool = .compareGaps }
-            } label: {
-                Label(isExtraTool ? store.tool.rawValue : "More", systemImage: "ellipsis")
-                    .padding(.horizontal, 8).padding(.vertical, 7)
-                    .background(isExtraTool ? Color.accentColor.opacity(0.12) : .clear,
-                                in: RoundedRectangle(cornerRadius: 6))
+            if advancedTools {
+                HStack(spacing: 4) { precisionTools; Spacer(); inspectionTools }
             }
-            .menuStyle(.borderlessButton).fixedSize()
-            Spacer(minLength: 8)
-            if !store.marks.isEmpty {
-                Menu {
-                    ForEach(Array(store.marks.enumerated()), id: \.element.id) { index, mark in
-                        Button("\(index + 1). \(mark.note.isEmpty ? "Comment" : String(mark.note.prefix(45)))") {
-                            selectMark(mark.id)
-                        }
-                    }
-                } label: { Label("\(store.marks.count)", systemImage: "bubble.left") }
-                .menuStyle(.borderlessButton).fixedSize().help("Reopen a comment")
-            }
-            if store.reference != nil {
-                Button(store.compare ? "Done comparing" : "Compare") { store.compare.toggle() }
-            }
-            Button { zoom = max(1, zoom - 0.5) } label: { Image(systemName: "minus.magnifyingglass") }
-                .disabled(zoom <= 1).help("Zoom out")
-            Button("Fit") { zoom = 1 }.help("Fit the full image")
-            Button { zoom = min(4, zoom + 0.5) } label: { Image(systemName: "plus.magnifyingglass") }
-                .disabled(zoom >= 4).help("Zoom in; scroll to move around")
-        }
-        .buttonStyle(.borderless)
-        .font(.system(size: 12, weight: .medium))
+            HStack(spacing: 12) {
+                viewTools
+            }.buttonStyle(.borderless).font(.system(size: 12))
+        }.font(.system(size: 12, weight: .medium))
     }
 
-    private var isGuide: Bool { store.tool == .guideHorizontal || store.tool == .guideVertical }
-    private var isExtraTool: Bool { [.focus, .move, .compareGaps].contains(store.tool) }
+    private var sharingBar: some View {
+        HStack(spacing: 8) {
+            Button { Task { await store.copyForAI() } } label: {
+                Label(store.isCopyingForAI ? "Preparing…" : "Copy for AI", systemImage: "doc.on.doc")
+            }.buttonStyle(.borderedProminent).controlSize(.small).disabled(store.isCopyingForAI)
+                .help("Copy instructions and visual evidence for your AI tool")
+            Menu {
+                Button("Copy instructions only") { store.copyForAgent() }
+                if let image = store.shareFiles.first(where: { $0.lastPathComponent.hasSuffix("-sequence.png") || $0.lastPathComponent == "annotated.png" }) {
+                    Button("Copy evidence image") { Task { await store.copyImage(at: image) } }
+                }
+            } label: { Image(systemName: "chevron.down") }.menuStyle(.borderlessButton).fixedSize()
+            if store.status.hasPrefix("Copied instructions") { Text("Copied").font(.caption).foregroundStyle(.secondary) }
+            Spacer()
+            Button {
+                withAnimation(.easeOut(duration: 0.16)) { reviewDetailsOpen.toggle() }
+            } label: {
+                Label("Files & feedback", systemImage: reviewDetailsOpen ? "chevron.down" : "chevron.right")
+            }.buttonStyle(.borderless).font(.caption)
+        }
+    }
+
+    @ViewBuilder private var inspectionTools: some View {
+        Button { runAutoAnnotate() } label: {
+            if store.isAutoAnnotating {
+                HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Scanning…") }
+            } else {
+                Label(autoAnnotateRegion == nil ? "Auto-annotate" : "Auto-annotate area", systemImage: "wand.and.stars")
+            }
+        }
+        .buttonStyle(.borderedProminent).controlSize(.small)
+        .disabled(store.isAutoAnnotating)
+        .help(autoAnnotateRegion == nil
+              ? "Measure this screenshot or video frame and mark spacing, padding, alignment and contrast problems"
+              : "Measure only the selected area and mark what looks wrong")
+        if store.layoutOverlay != nil {
+            Button { store.showWireframe.toggle() } label: {
+                Label("Wireframe", systemImage: "square.dashed.inset.filled")
+            }
+            .foregroundStyle(store.showWireframe ? Color.purple : .secondary)
+            .help(store.showWireframe ? "Hide the detected layout" : "Show the detected layout")
+        }
+    }
+
+    private var analysisButton: some View {
+        Button {
+            let id = activeMark ?? store.ensureWholeReview()
+            activeMark = id; commentsOpen = true
+            analyze(id)
+        } label: {
+            Label(activeMark.flatMap { id in store.marks.first { $0.id == id } }.map { $0.wholeMedia == true && $0.aiGenerated != true ? (store.videoURL == nil ? "Analyze image" : "Analyze video") : "Analyze selection" }
+                  ?? (store.videoURL == nil ? "Analyze image" : "Analyze video"), systemImage: "sparkles")
+        }.buttonStyle(.borderedProminent).controlSize(.small)
+            .disabled(!store.analyzingMarkIDs.isEmpty || (store.videoURL != nil && store.duration <= 0))
+            .help("Review the entire image or video without drawing annotations, or analyze a selected comment")
+    }
+
+    @ViewBuilder private var viewTools: some View {
+        Button {
+            if let mark = store.marks.first(where: { $0.id == activeMark }), let end = mark.end, mark.kind == .focus {
+                zoomToArea(mark.start, end)
+            } else { selectingZoom.toggle(); store.pauseForAnnotation() }
+        } label: {
+            Label(selectingZoom ? "Cancel zoom" : "Zoom to area", systemImage: "viewfinder")
+        }.foregroundStyle(selectingZoom ? Color.accentColor : .primary)
+        Button(zoom == 1 ? "Fit" : String(format: "%.1f×", zoom)) { focusAnimation?.cancel(); zoom = 1; zoomCenter = UnitPoint2D(x: 0.5, y: 0.5); selectingZoom = false }
+            .help("Fit the whole image")
+        Button { store.undoAnnotations() } label: { Label("Undo", systemImage: "arrow.uturn.backward").labelStyle(.iconOnly) }
+            .disabled(!store.canUndoAnnotations).help("Undo annotation").keyboardShortcut("z", modifiers: .command)
+        Button { store.redoAnnotations() } label: { Label("Redo", systemImage: "arrow.uturn.forward").labelStyle(.iconOnly) }
+            .disabled(!store.canRedoAnnotations).help("Redo annotation").keyboardShortcut("z", modifiers: [.command, .shift])
+        Button { removeSelectedMark(force: true) } label: { Image(systemName: "trash") }
+            .disabled(activeMark == nil).help("Remove selected annotation")
+        Button("Clear") {
+            store.clearAnnotations(); activeMark = nil; focusedMark = nil; selectingTime = false
+        }.disabled(store.marks.isEmpty && store.layoutOverlay == nil && store.pendingGapPreview == nil).help("Clear all comments and marks. Undo restores them.")
+        Spacer(minLength: 8)
+        if store.layoutOverlay != nil && !advancedTools {
+            Button { store.showWireframe.toggle() } label: { Label("Wireframe", systemImage: "square.dashed.inset.filled") }
+                .help("Show or hide the detected layout")
+        }
+        Button {
+            let visible = commentsVisible
+            withAnimation(.easeOut(duration: 0.16)) {
+                commentsOpen = !visible; showEmptySidebar = !visible
+            }
+            if visible { focusedMark = nil }
+        } label: {
+            Label("Comments \(store.marks.count)", systemImage: "sidebar.right")
+        }.help(commentsVisible ? "Hide comments" : "Show comments")
+
+    }
+
+    /// A box the person drew becomes the area to scan; generated notes never count.
+    private var autoAnnotateRegion: CGRect? {
+        guard let mark = store.marks.first(where: { $0.id == activeMark }), mark.kind == .focus,
+              mark.auto != true, let end = mark.end else { return nil }
+        let rect = CGRect(x: min(mark.start.x, end.x), y: min(mark.start.y, end.y),
+                          width: abs(mark.start.x - end.x), height: abs(mark.start.y - end.y))
+        return rect.width > 0.02 && rect.height > 0.02 ? rect : nil
+    }
+
+    private func runAutoAnnotate() {
+        let region = autoAnnotateRegion
+        focusedMark = nil
+        Task {
+            if await store.autoAnnotate(in: region) != nil { commentsOpen = true }
+        }
+    }
+
+    private func zoomToArea(_ start: UnitPoint2D, _ end: UnitPoint2D) {
+        focusAnimation?.cancel()
+        let width = abs(start.x - end.x), height = abs(start.y - end.y)
+        guard width > 0.005, height > 0.005 else { return }
+        zoomCenter = UnitPoint2D(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
+        zoom = min(8, max(1, 0.8 / max(width, height)))
+        selectingZoom = false
+    }
+
+    private func zoomBy(_ factor: CGFloat, _ anchor: UnitPoint2D) {
+        focusAnimation?.cancel()
+        zoom = min(8, max(1, zoom * factor))
+        zoomCenter = anchor
+        selectingZoom = false
+    }
+
+    private func removeSelectedMark(force: Bool = false) {
+        guard (force || focusedMark == nil), let activeMark else { return }
+        store.marks.removeAll { $0.id == activeMark }
+        self.activeMark = nil
+        focusedMark = nil
+        selectingTime = false
+    }
+
+    private func analyze(_ markID: UUID) {
+        store.pauseForAnnotation()
+        if AIConnection.load().configurationError != nil {
+            pendingAnalysisMarkID = markID
+            openAPISettings()
+        } else { store.analyzeDesign(for: markID) }
+    }
+
+    private func openAPISettings() {
+        settingsSection = .ai
+        showAPISettings = true
+    }
+
+    private var apiSettings: some View {
+        FrameNoteSettingsView(section: settingsSection, onSavedAI: {
+            showAPISettings = false
+            if let pendingAnalysisMarkID { store.analyzeDesign(for: pendingAnalysisMarkID) }
+            pendingAnalysisMarkID = nil
+        }, onClose: {
+            showAPISettings = false; pendingAnalysisMarkID = nil
+        })
+    }
+
+    @ViewBuilder private var primaryTools: some View {
+        toolButton(.point, title: "Comment")
+        toolButton(.focus, title: "Box")
+        toolButton(.arrow, title: "Arrow")
+        if advancedTools { toolButton(.move, title: "Move here") }
+    }
+
+    @ViewBuilder private var precisionTools: some View {
+        toolButton(.measure, title: "Measure")
+        toolButton(.compareGaps, title: "Compare")
+        toolButton(.guideHorizontal, title: "H guide")
+        toolButton(.guideVertical, title: "V guide")
+    }
+
+    /// Lets a placed comment change type (pin, box, arrow, …) without redrawing it.
+    private func kindPicker(_ mark: ReviewMark) -> some View {
+        let kinds: [MarkKind] = [.point, .focus, .arrow, .move, .measure, .guideHorizontal, .guideVertical]
+        return HStack(spacing: 2) {
+            ForEach(kinds) { kind in
+                Button { store.convertMark(mark.id, to: kind) } label: {
+                    Image(systemName: symbol(for: kind))
+                        .rotationEffect(.degrees(kind == .guideVertical ? 90 : 0))
+                        .frame(width: 28, height: 24)
+                        .foregroundStyle(mark.kind == kind ? Color.accentColor : .secondary)
+                        .background(mark.kind == kind ? Color.accentColor.opacity(0.12) : .clear,
+                                    in: RoundedRectangle(cornerRadius: 5))
+                }
+                .buttonStyle(ImmediateToolStyle())
+                .help("Change to \(kind == .point ? "Comment" : kind.rawValue)")
+                .accessibilityLabel(kind == .point ? "Comment" : kind.rawValue)
+            }
+        }
+    }
+
+    private var commentsPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Comments").font(.headline)
+                Text("\(store.marks.filter { !$0.isApproved }.count) open")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+            }
+            if store.marks.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Image(systemName: "cursorarrow.click.2").font(.title2).foregroundStyle(Color.accentColor)
+                    Text("Point. Comment. Share.").font(.subheadline.weight(.semibold))
+                    Text("Click a detail or draw a box. Write what should change here.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }.padding(.top, 20)
+                Spacer()
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 10) {
+                            ForEach(Array(store.marks.enumerated()), id: \.element.id) { index, mark in
+                                commentCard(mark, number: index + 1).id(mark.id)
+                            }
+                        }.padding(2)
+                    }
+                    .onChange(of: activeMark) { _, id in
+                        if let id { proxy.scrollTo(id, anchor: .center) }
+                    }
+                }
+            }
+        }
+    }
+
+    private func commentCard(_ mark: ReviewMark, number: Int) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button { selectMark(mark.id) } label: {
+                HStack(spacing: 7) {
+                    Text("\(number)").font(.caption.weight(.semibold))
+                        .frame(width: 22, height: 22)
+                        .background(Color.accentColor.opacity(0.1), in: Circle())
+                    Text(mark.wholeMedia == true ? (mark.aiGenerated == true ? "Observation" : "Whole review") : mark.kind == .point ? "Comment" : mark.kind.rawValue).font(.caption.weight(.medium))
+                    if mark.aiGenerated == true {
+                        Text("AI").font(.system(size: 9, weight: .semibold)).foregroundStyle(.purple)
+                    }
+                    if mark.auto == true {
+                        Text("Auto").font(.system(size: 9, weight: .semibold))
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(Color.purple.opacity(0.12), in: Capsule())
+                            .foregroundStyle(Color.purple)
+                            .help("Measured from the pixels. Edit it, approve it, or delete it.")
+                    }
+                    Spacer()
+                    if let time = mark.time {
+                        Text(preciseTime(time)).font(.caption.monospacedDigit())
+                    }
+                }.foregroundStyle(mark.isApproved ? Color.secondary : Color.accentColor)
+            }.buttonStyle(.plain)
+            if activeMark == mark.id {
+                TextField("What should change?", text: Binding(get: {
+                    store.marks.first { $0.id == mark.id }?.note ?? ""
+                }, set: { text in
+                    if let index = store.marks.firstIndex(where: { $0.id == mark.id }) { store.marks[index].note = text }
+                }), axis: .vertical)
+                .lineLimit(3...8).textFieldStyle(.plain).font(.system(size: 13))
+                .focused($focusedMark, equals: mark.id)
+                .task(id: mark.id) {
+                    // The lazy sidebar creates the editor after the mark is selected.
+                    // Request focus once its native text field has actually mounted.
+                    focusedMark = nil
+                    await Task.yield()
+                    if activeMark == mark.id { focusedMark = mark.id }
+                }
+                .onExitCommand { focusedMark = nil }
+                if mark.wholeMedia != true { kindPicker(mark) }
+                if let time = mark.time {
+                    Button {
+                        store.pauseForAnnotation(); selectingTime = true
+                    } label: {
+                        Label(mark.endTime.map { "\(preciseTime(time)) – \(preciseTime($0))" } ?? "Add time range", systemImage: "clock")
+                    }.buttonStyle(.borderless).font(.caption)
+                    if mark.endTime != nil {
+                        Button("Use a single frame") {
+                            if let index = store.marks.firstIndex(where: { $0.id == mark.id }) { store.marks[index].endTime = nil }
+                        }.buttonStyle(.borderless).font(.caption)
+                    }
+                }
+            } else {
+                Button { selectMark(mark.id) } label: {
+                    Text(mark.note.isEmpty ? "Write a comment…" : mark.note)
+                        .font(.system(size: 13)).foregroundStyle(mark.note.isEmpty ? .secondary : .primary)
+                        .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
+                }.buttonStyle(.plain)
+            }
+            if activeMark == mark.id, mark.kind == .focus, let end = mark.end {
+                HStack {
+                    Button("Zoom to this area") { zoomToArea(mark.start, end) }.buttonStyle(.borderless)
+                    Spacer()
+                    Text("\(Int(abs(end.x - mark.start.x) * Double(pixelSize.0))) × \(Int(abs(end.y - mark.start.y) * Double(pixelSize.1))) px")
+                        .foregroundStyle(.secondary)
+                }.font(.caption)
+            }
+            if activeMark == mark.id {
+                Button { analyze(mark.id) } label: { Label(mark.wholeMedia == true && mark.aiGenerated != true ? "Analyze whole review" : "Analyze this", systemImage: "sparkles") }
+                    .buttonStyle(.borderedProminent).controlSize(.small)
+                    .disabled(store.analyzingMarkIDs.contains(mark.id))
+                if store.analyzingMarkIDs.contains(mark.id) {
+                    HStack { ProgressView().controlSize(.small); Text("Reviewing interaction, motion, and visual design…") }
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if let error = store.analysisErrors[mark.id] {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                }
+                if let analysis = mark.designAnalysis {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("Design suggestions").font(.caption.weight(.semibold))
+                        ScrollView { Text(.init(analysis)).font(.caption).frame(maxWidth: .infinity, alignment: .leading) }
+                            .frame(maxHeight: 220)
+                        Button("Add suggestions to comment") {
+                            if let index = store.marks.firstIndex(where: { $0.id == mark.id }) {
+                                let note = store.marks[index].note
+                                store.marks[index].note = note.isEmpty ? analysis : note + "\n\n" + analysis
+                            }
+                        }.buttonStyle(.borderless).font(.caption)
+                    }.padding(8).background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+                }
+            }
+            HStack {
+                Button {
+                    if let index = store.marks.firstIndex(where: { $0.id == mark.id }) {
+                        store.marks[index].isApproved.toggle()
+                    }
+                } label: {
+                    Label(mark.isApproved ? "Approved" : "Approve", systemImage: mark.isApproved ? "checkmark.circle.fill" : "checkmark.circle")
+                }.foregroundStyle(mark.isApproved ? Color.green : Color.secondary)
+                Spacer()
+                Button {
+                    store.marks.removeAll { $0.id == mark.id }
+                    if activeMark == mark.id { activeMark = nil; focusedMark = nil; selectingTime = false }
+                } label: { Image(systemName: "trash") }
+                .help("Remove comment")
+            }.buttonStyle(.borderless).font(.caption)
+        }
+        .padding(12)
+        .background(activeMark == mark.id ? Color.accentColor.opacity(0.05) : Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(activeMark == mark.id ? Color.accentColor.opacity(0.5) : .primary.opacity(0.08), lineWidth: 1))
+    }
+
+    private var commentTrack: some View {
+        FeedbackTrack(marks: store.marks, duration: store.videoURL == nil ? nil : store.duration,
+                      activeMark: activeMark, onSelect: selectMark)
+    }
 
     private func toolButton(_ tool: MarkKind, title: String) -> some View {
         Button { store.tool = tool } label: {
-            Label(title, systemImage: symbol(for: tool))
-                .padding(.horizontal, 9).padding(.vertical, 7)
+            Label {
+                Text(title)
+            } icon: {
+                Image(systemName: symbol(for: tool))
+                    .rotationEffect(.degrees(tool == .guideVertical ? 90 : 0))
+            }
+                .padding(.horizontal, density == .compact ? 8 : 12).padding(.vertical, density == .compact ? 6 : 9)
                 .foregroundStyle(store.tool == tool ? Color.accentColor : .primary)
                 .background(store.tool == tool ? Color.accentColor.opacity(0.12) : .clear,
                             in: RoundedRectangle(cornerRadius: 6))
         }
-        .buttonStyle(.plain).fixedSize()
+        .buttonStyle(ImmediateToolStyle()).fixedSize().help(instruction(for: tool))
     }
 
     private var playbackControls: some View {
-        HStack(spacing: 10) {
-            Button { activeMark = nil; focusedMark = nil; selectingTime = false; store.togglePlayback() } label: {
-                Image(systemName: store.isPlaying ? "pause.fill" : "play.fill")
-                    .frame(width: 26, height: 26)
-            }
-            .buttonStyle(.plain).accessibilityLabel(store.isPlaying ? "Pause" : "Play")
+        VStack(spacing: 4) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) { transportControls; Spacer(); rangeControls }
+                VStack(spacing: 4) {
+                    HStack(spacing: 10) { transportControls; Spacer() }
+                    HStack(spacing: 12) { rangeControls; Spacer() }
+                }
+            }.font(.system(size: 12)).buttonStyle(.borderless)
             VideoTimeline(currentTime: store.currentTime, duration: store.duration,
                           selection: selectedRange, selecting: selectingTime,
                           marks: store.marks, onSeek: { time in
                 store.pauseForAnnotation(); store.seek(to: time)
             }, onRange: setTimeRange)
-                .frame(height: 30)
-            Button {
-                store.pauseForAnnotation()
-                selectingTime.toggle()
-            } label: {
-                Label(selectingTime ? "Cancel" : "Select time", systemImage: "selection.pin.in.out")
-            }
-            .buttonStyle(.borderless).foregroundStyle(selectingTime ? Color.accentColor : .secondary)
-            .disabled(store.duration <= 0)
-            Text("\(timeLabel(store.currentTime)) / \(timeLabel(store.duration))")
-                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-            Button { store.toggleLoop() } label: {
-                Image(systemName: "repeat")
-                    .foregroundStyle(store.loopEnabled ? Color.accentColor : .secondary)
-            }
-            .buttonStyle(.plain).help("Loop 3 seconds around this moment")
-            .disabled(store.duration <= 0)
+            .frame(height: 24).padding(.horizontal, 2)
         }
-        .frame(height: 30)
+    }
+
+    @ViewBuilder private var transportControls: some View {
+        Button { focusedMark = nil; selectingTime = false; store.togglePlayback() } label: {
+            Label(store.isPlaying ? "Pause" : "Play", systemImage: store.isPlaying ? "pause.fill" : "play.fill")
+        }
+        Button { focusedMark = nil; store.stepFrame(-1) } label: { Image(systemName: "backward.frame") }
+            .help("Previous frame").accessibilityLabel("Previous frame")
+        Button { focusedMark = nil; store.stepFrame(1) } label: { Image(systemName: "forward.frame") }
+            .help("Next frame").accessibilityLabel("Next frame")
+        Text(preciseTime(store.currentTime)).monospacedDigit().foregroundStyle(.secondary)
+        HStack(spacing: 2) {
+            ForEach([Float(0.25), 0.5, 1], id: \.self) { rate in
+                Button { store.setPlaybackRate(rate) } label: {
+                    Text(rate == 1 ? "1×" : rate == 0.5 ? "0.5×" : "0.25×")
+                        .font(.system(size: 11, weight: .medium)).padding(.horizontal, 8).padding(.vertical, 5)
+                        .background(store.playbackRate == rate ? Color.accentColor.opacity(0.15) : .clear,
+                                    in: RoundedRectangle(cornerRadius: 5))
+                }.buttonStyle(ImmediateToolStyle())
+            }
+        }.background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    @ViewBuilder private var rangeControls: some View {
+        Button {
+            store.pauseForAnnotation(); selectingTime.toggle()
+        } label: {
+            Label(selectingTime ? "Cancel selection" : "Select time range", systemImage: "selection.pin.in.out")
+        }.foregroundStyle(selectingTime ? Color.accentColor : .secondary).disabled(store.duration <= 0)
+        Button { store.toggleLoop(range: selectedRange) } label: {
+            Label(selectedRange == nil ? "Loop 3s" : "Loop selection", systemImage: "repeat")
+                .foregroundStyle(store.loopEnabled ? Color.accentColor : .secondary)
+        }.disabled(store.duration <= 0)
     }
 
     private var selectedRange: ClosedRange<Double>? {
@@ -275,36 +801,44 @@ struct ContentView: View {
         return start...max(start, end)
     }
 
-    @ViewBuilder private func commentEditor(for mark: ReviewMark) -> some View {
-        let binding = Binding<ReviewMark>(get: {
-            store.marks.first(where: { $0.id == mark.id }) ?? mark
-        }, set: { updated in
-            if let index = store.marks.firstIndex(where: { $0.id == mark.id }) { store.marks[index] = updated }
-        })
-        MarkEditor(mark: binding,
-                   number: (store.marks.firstIndex { $0.id == mark.id } ?? 0) + 1,
-                   focusedMark: $focusedMark,
-                   onDelete: {
-                       store.marks.removeAll { $0.id == mark.id }; activeMark = nil
-                   }, onDone: { activeMark = nil; focusedMark = nil },
-                   onTime: { selectingTime = true },
-                   onRemoveTime: {
-                       if let index = store.marks.firstIndex(where: { $0.id == mark.id }) {
-                           store.marks[index].endTime = nil
-                       }
-                   })
-    }
-
     private func selectMark(_ id: UUID) {
         guard let mark = store.marks.first(where: { $0.id == id }) else { return }
         store.pauseForAnnotation()
         if let time = mark.time { store.seek(to: time) }
+        commentsOpen = true
         activeMark = id
+        if automaticallyFocusComments && mark.wholeMedia != true { focusComment(mark) }
         DispatchQueue.main.async { focusedMark = id }
+    }
+
+    private func focusComment(_ mark: ReviewMark) {
+        focusAnimation?.cancel()
+        let points = [mark.start, mark.end, mark.secondStart, mark.secondEnd].compactMap { $0 }
+        let loX = points.map(\.x).min() ?? mark.start.x, hiX = points.map(\.x).max() ?? mark.start.x
+        let loY = points.map(\.y).min() ?? mark.start.y, hiY = points.map(\.y).max() ?? mark.start.y
+        let targetCenter = UnitPoint2D(x: (loX + hiX) / 2, y: (loY + hiY) / 2)
+        let targetZoom = min(4, max(1, 0.65 / max(0.22, max(hiX - loX, hiY - loY))))
+        let initialZoom = zoom, initialCenter = zoomCenter
+        selectingZoom = false
+        if reduceMotion { zoom = targetZoom; zoomCenter = targetCenter; return }
+        focusAnimation = Task { @MainActor in
+            let clock = ContinuousClock(), started = ContinuousClock.now
+            while !Task.isCancelled {
+                let elapsed = started.duration(to: clock.now).components
+                let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+                let t = min(1, seconds / 0.32), eased = t * t * (3 - 2 * t)
+                zoom = initialZoom + (targetZoom - initialZoom) * eased
+                zoomCenter = UnitPoint2D(x: initialCenter.x + (targetCenter.x - initialCenter.x) * eased,
+                                        y: initialCenter.y + (targetCenter.y - initialCenter.y) * eased)
+                if t == 1 { return }
+                do { try await Task.sleep(for: .milliseconds(16)) } catch { return }
+            }
+        }
     }
 
     private func setTimeRange(_ range: ClosedRange<Double>) {
         store.pauseForAnnotation()
+        store.loopEnabled = false
         store.seek(to: range.lowerBound)
         if let index = store.marks.firstIndex(where: { $0.id == activeMark }) {
             store.marks[index].time = range.lowerBound
@@ -316,6 +850,7 @@ struct ContentView: View {
             activeMark = mark.id
         }
         selectingTime = false
+        commentsOpen = true
         DispatchQueue.main.async { focusedMark = activeMark }
     }
 
@@ -335,116 +870,123 @@ struct ContentView: View {
         let count = store.marks.count
         store.addMark(start: start, end: end)
         guard store.marks.count > count, let mark = store.marks.last else { return }
+        commentsOpen = true
         activeMark = mark.id
         DispatchQueue.main.async { focusedMark = mark.id }
     }
 
+    private func referenceImported() {
+        showingLauncher = false
+        detailedEditing = false
+        analyze(store.ensureWholeReview())
+    }
+
+    private func pasteReference() {
+        guard !importing else { return }
+        do {
+            let media = try ClipboardMedia.read()
+            startImport(media.url, cleanup: media.temporary)
+        } catch { store.status = "Could not paste. Copy a link, image, or video first." }
+    }
+
+    private func startImport(_ url: URL, cleanup: Bool = false) {
+        guard !importing else { return }
+        importing = true
+        store.status = "Getting your reference…"
+        importTask = Task {
+            defer {
+                importing = false
+                if cleanup { try? FileManager.default.removeItem(at: url) }
+            }
+            do {
+                try await store.importInspiration(url, source: url.isFileURL ? url.lastPathComponent : url.absoluteString)
+                referenceImported()
+            } catch is CancellationError { store.status = "Import cancelled." }
+            catch { store.status = "Could not import: " + error.localizedDescription }
+        }
+    }
+
     private func importMedia() {
+        guard !importing else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image, .movie]
         panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        if UTType(filenameExtension: url.pathExtension)?.conforms(to: .movie) == true {
-            store.openVideo(at: url)
-        } else {
-            store.openImage(at: url)
+        panel.begin { response in
+            if response == .OK, let url = panel.url { startImport(url) }
         }
     }
+
 }
 
-private struct MarkEditor: View {
-    @Binding var mark: ReviewMark
-    let number: Int
-    @FocusState.Binding var focusedMark: UUID?
-    var onDelete: () -> Void
-    var onDone: () -> Void
-    var onTime: () -> Void
-    var onRemoveTime: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Comment \(number)").font(.system(size: 12, weight: .medium))
-                Spacer()
-                Button(action: onDelete) { Image(systemName: "trash") }
-                    .buttonStyle(.plain).foregroundStyle(.secondary).help("Delete comment")
-                Button("Done", action: onDone).buttonStyle(.borderless)
-            }
-            TextField("Write a comment…", text: $mark.note, axis: .vertical)
-                .lineLimit(2...4).textFieldStyle(.plain).font(.system(size: 13))
-                .focused($focusedMark, equals: mark.id)
-                .onExitCommand(perform: onDone)
-            if let time = mark.time {
-                HStack(spacing: 6) {
-                    Button(action: onTime) {
-                        Label(mark.endTime.map { "\(preciseTime(time)) – \(preciseTime($0))" }
-                              ?? "\(preciseTime(time)) · Add time range", systemImage: "clock")
-                            .font(.system(size: 11).monospacedDigit())
-                    }.buttonStyle(.borderless)
-                    if mark.endTime != nil {
-                        Spacer(minLength: 0)
-                        Button(action: onRemoveTime) { Image(systemName: "xmark").font(.system(size: 9)) }
-                            .buttonStyle(.plain).help("Use a single frame")
-                    }
-                }
-            }
-        }
-        .padding(14).frame(width: 248)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.black.opacity(0.08), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.12), radius: 14, y: 4)
-    }
-}
-
-private struct ReviewCanvas<Editor: View>: View {
+private struct ReviewCanvas: View {
     let screenshot: NSImage?
     let player: AVPlayer?
     let aspect: CGSize
     let marks: [ReviewMark]
+    let wireframe: LayoutOverlay?
     let tool: MarkKind
     let currentTime: Double?
     let pixelSize: (Int, Int)
     let zoom: CGFloat
+    let zoomCenter: UnitPoint2D
+    let selectingZoom: Bool
     let activeMark: UUID?
+    let editableIDs: Set<UUID>
     var onStart: () -> Void
     var onMark: (UnitPoint2D, UnitPoint2D?) -> Void
     var onSelect: (UUID) -> Void
-    var reference: NSImage? = nil
-    var compare = false
-    var comparisonFraction = 0.5
-    @ViewBuilder var editor: (ReviewMark) -> Editor
+    var onEdit: (ReviewMark) -> Void
+    var onZoom: (UnitPoint2D, UnitPoint2D) -> Void
+    var onZoomFactor: (CGFloat, UnitPoint2D) -> Void
     @State private var draft: ReviewMark?
+    @State private var editing: (mark: ReviewMark, handle: MarkEditHandle)?
+    @State private var gestureStarted = false
 
     var body: some View {
         GeometryReader { geometry in
             let fitted = fittedSize(in: geometry.size)
-            ScrollView([.horizontal, .vertical]) {
+            ReviewViewport(documentSize: CGSize(width: max(fitted.width, geometry.size.width), height: max(fitted.height, geometry.size.height)),
+                           imageSize: fitted, center: zoomCenter, zoom: zoom, onZoom: onZoomFactor) {
                 ZStack(alignment: .topLeading) {
                     media(size: fitted)
-                        .allowsHitTesting(false)
-                    MarksOverlay(marks: visibleMarks + (draft.map { [$0] } ?? []), pixelSize: pixelSize, numbers: Dictionary(uniqueKeysWithValues: marks.enumerated().map { ($0.element.id, $0.offset + 1) }))
+                    if let wireframe, wireframe.isVisible(at: currentTime) {
+                        WireframeOverlay(overlay: wireframe)
+                            .frame(width: fitted.width, height: fitted.height)
+                            .allowsHitTesting(false)
+                    }
+                    MarksOverlay(marks: visibleMarks.filter { $0.id != draft?.id } + (draft.map { [$0] } ?? []), pixelSize: pixelSize, activeMark: activeMark, numbers: Dictionary(uniqueKeysWithValues: marks.enumerated().map { ($0.element.id, $0.offset + 1) }))
                         .frame(width: fitted.width, height: fitted.height)
                         .allowsHitTesting(false)
-                    if !compare {
-                        AnnotationInputSurface(onStart: onStart, onChange: { start, end in
-                            draft = ReviewMark(kind: tool == .point ? .focus : tool, start: start, end: endpoint(end),
-                                               time: currentTime, note: "")
+                    AnnotationInputSurface(onStart: onStart, onChange: { start, end in
+                            if !gestureStarted {
+                                gestureStarted = true
+                                if !selectingZoom {
+                                    let ordered = visibleMarks.filter { editableIDs.contains($0.id) }.sorted { $0.id == activeMark && $1.id != activeMark }
+                                    for mark in ordered {
+                                        if let handle = MarkEditing.handle(for: mark, at: start, size: fitted, selected: mark.id == activeMark) {
+                                            editing = (mark, handle); break
+                                        }
+                                    }
+                                }
+                            }
+                            if let editing {
+                                draft = MarkEditing.edited(editing.mark, handle: editing.handle, from: start, to: end)
+                            } else {
+                                draft = ReviewMark(kind: selectingZoom || tool == .point ? .focus : tool, start: start, end: endpoint(end),
+                                                   time: currentTime, note: "")
+                            }
                         }, onFinish: { start, end in
-                            draft = nil
-                            if abs(start.x - end.x) * fitted.width < 5,
-                               abs(start.y - end.y) * fitted.height < 5,
-                               let existing = visibleMarks.last(where: { hit($0, at: start, size: fitted) }) {
-                                onSelect(existing.id)
+                            defer { draft = nil; editing = nil; gestureStarted = false }
+                            if selectingZoom { onZoom(start, end); return }
+                            let clicked = abs(start.x - end.x) * fitted.width < 5 && abs(start.y - end.y) * fitted.height < 5
+                            if let editing {
+                                if !clicked {
+                                    onEdit(MarkEditing.edited(editing.mark, handle: editing.handle, from: start, to: end))
+                                }
+                                if clicked || activeMark != editing.mark.id { onSelect(editing.mark.id) }
                             } else { onMark(start, endpoint(end)) }
                         })
                         .frame(width: fitted.width, height: fitted.height)
-                    }
-                }
-                .overlay(alignment: .topLeading) {
-                    if !compare, let mark = visibleMarks.first(where: { $0.id == activeMark }) {
-                        editor(mark)
-                            .offset(editorPosition(mark, size: fitted))
-                    }
                 }
                 .frame(width: fitted.width, height: fitted.height)
                 .frame(minWidth: geometry.size.width, minHeight: geometry.size.height)
@@ -458,46 +1000,14 @@ private struct ReviewCanvas<Editor: View>: View {
     }
 
     private func media(size: CGSize) -> some View {
-        ZStack(alignment: .leading) {
-            if compare, let reference {
-                Image(nsImage: reference).resizable().frame(width: size.width, height: size.height)
-            }
-            Group {
-                if let player { PlayerSurface(player: player) }
-                else if let screenshot { Image(nsImage: screenshot).resizable() }
-            }
-            .frame(width: size.width, height: size.height)
-            .mask(alignment: .leading) {
-                Rectangle().frame(width: size.width * (compare ? comparisonFraction : 1))
-            }
-            if compare {
-                Rectangle().fill(.red).frame(width: 2, height: size.height)
-                    .offset(x: size.width * comparisonFraction)
-            }
+        Group {
+            if let player { PlayerSurface(player: player) }
+            else if let screenshot { Image(nsImage: screenshot).resizable() }
         }
+        .frame(width: size.width, height: size.height)
     }
 
     private var visibleMarks: [ReviewMark] { marks.filter { $0.isVisible(at: currentTime) } }
-
-    private func hit(_ mark: ReviewMark, at point: UnitPoint2D, size: CGSize) -> Bool {
-        let anchor = mark.kind == .focus ? UnitPoint2D(x: min(mark.start.x, mark.end?.x ?? mark.start.x),
-                                                       y: min(mark.start.y, mark.end?.y ?? mark.start.y)) :
-                     mark.kind == .move ? (mark.end ?? mark.start) : mark.start
-        if hypot((point.x - anchor.x) * size.width, (point.y - anchor.y) * size.height) < 14 { return true }
-        if mark.kind == .focus, let end = mark.end {
-            return point.x >= min(mark.start.x, end.x) && point.x <= max(mark.start.x, end.x)
-                && point.y >= min(mark.start.y, end.y) && point.y <= max(mark.start.y, end.y)
-        }
-        return false
-    }
-
-    private func editorPosition(_ mark: ReviewMark, size: CGSize) -> CGSize {
-        let left = min(mark.start.x, mark.end?.x ?? mark.start.x) * size.width
-        let right = max(mark.start.x, mark.end?.x ?? mark.start.x) * size.width
-        let x = right + 290 < size.width ? right + 14 : left - 290
-        let y = min(mark.start.y, mark.end?.y ?? mark.start.y) * size.height
-        return CGSize(width: max(8, min(x, size.width - 284)), height: max(8, min(y, size.height - 190)))
-    }
 
     private func fittedSize(in available: CGSize) -> CGSize {
         let width = max(aspect.width, 1)
@@ -525,9 +1035,39 @@ private struct PlayerSurface: NSViewRepresentable {
     }
 }
 
+/// The detected layout: boxes around elements and thin lines where several elements share an edge.
+private struct WireframeOverlay: View {
+    let overlay: LayoutOverlay
+
+    var body: some View {
+        Canvas { context, size in
+            let purple = Color(red: 0.55, green: 0.25, blue: 0.95)
+            for guide in overlay.guides {
+                var path = Path()
+                if guide.axis == .vertical {
+                    path.move(to: CGPoint(x: guide.position * size.width, y: 0))
+                    path.addLine(to: CGPoint(x: guide.position * size.width, y: size.height))
+                } else {
+                    path.move(to: CGPoint(x: 0, y: guide.position * size.height))
+                    path.addLine(to: CGPoint(x: size.width, y: guide.position * size.height))
+                }
+                context.stroke(path, with: .color(purple.opacity(0.3)), lineWidth: 0.6)
+            }
+            for element in overlay.elements {
+                let rect = CGRect(x: element.rect.minX * size.width, y: element.rect.minY * size.height,
+                                  width: element.rect.width * size.width, height: element.rect.height * size.height)
+                if element.kind == .container { context.fill(Path(rect), with: .color(purple.opacity(0.06))) }
+                context.stroke(Path(rect), with: .color(purple.opacity(element.kind == .container ? 0.9 : 0.7)),
+                               lineWidth: element.kind == .container ? 1.1 : 0.8)
+            }
+        }
+    }
+}
+
 private struct MarksOverlay: View {
     let marks: [ReviewMark]
     let pixelSize: (Int, Int)
+    var activeMark: UUID?
     var numbers: [UUID: Int] = [:]
 
     var body: some View {
@@ -576,20 +1116,41 @@ private struct MarksOverlay: View {
                     if let end {
                         stroke(&context, from: start, to: end, color: .cyan)
                         endpoint(&context, at: start); endpoint(&context, at: end)
-                        context.draw(Text("A").font(.system(size: 12, weight: .medium)).foregroundColor(.cyan), at: midpoint(start, end))
+                        context.draw(Text("A · \(pixels(mark.start, mark.end)) px").font(.system(size: 11, weight: .medium)).foregroundColor(.cyan), at: midpoint(start, end))
                     }
                     if let secondStart = mark.secondStart.map({ point($0, size) }),
                        let secondEnd = mark.secondEnd.map({ point($0, size) }) {
                         stroke(&context, from: secondStart, to: secondEnd, color: .purple)
                         endpoint(&context, at: secondStart); endpoint(&context, at: secondEnd)
-                        context.draw(Text("B").font(.system(size: 12, weight: .medium)).foregroundColor(.purple), at: midpoint(secondStart, secondEnd))
+                        context.draw(Text("B · \(pixels(mark.secondStart, mark.secondEnd)) px").font(.system(size: 11, weight: .medium)).foregroundColor(.purple), at: midpoint(secondStart, secondEnd))
                         badge(context: &context, at: start, number: numbers[mark.id] ?? (index + 1))
+                    }
+                }
+                if mark.id == activeMark, mark.end != nil {
+                    var handles: [UnitPoint2D] = []
+                    if mark.kind == .focus, let end = mark.end {
+                        handles = [mark.start, end, UnitPoint2D(x: mark.start.x, y: end.y), UnitPoint2D(x: end.x, y: mark.start.y)]
+                    } else {
+                        handles = [mark.start, mark.end, mark.secondStart, mark.secondEnd].compactMap { $0 }
+                    }
+                    for handle in handles {
+                        let location = point(handle, size)
+                        let path = Path(roundedRect: CGRect(x: location.x - 4, y: location.y - 4, width: 8, height: 8), cornerRadius: 2)
+                        context.fill(path, with: .color(.white))
+                        context.stroke(path, with: .color(.blue), lineWidth: 1.5)
+                    }
+                    if mark.kind == .focus, let end {
+                        badge(context: &context, at: CGPoint(x: min(start.x, end.x), y: min(start.y, end.y)), number: numbers[mark.id] ?? (index + 1))
                     }
                 }
             }
         }
     }
 
+    private func pixels(_ a: UnitPoint2D?, _ b: UnitPoint2D?) -> Int {
+        guard let a, let b else { return 0 }
+        return Int(hypot((b.x - a.x) * Double(pixelSize.0), (b.y - a.y) * Double(pixelSize.1)).rounded())
+    }
     private func point(_ value: UnitPoint2D, _ size: CGSize) -> CGPoint {
         CGPoint(x: value.x * size.width, y: value.y * size.height)
     }
@@ -636,7 +1197,7 @@ private func symbol(for kind: MarkKind) -> String {
     case .arrow: "arrow.up.right"
     case .measure: "ruler"
     case .guideHorizontal: "line.3.horizontal"
-    case .guideVertical: "line.3.vertical"
+    case .guideVertical: "line.3.horizontal"
     case .focus: "viewfinder"
     case .move: "arrow.up.forward.and.arrow.down.backward"
     case .compareGaps: "equal"
@@ -675,5 +1236,5 @@ private func timeLabel(_ seconds: Double) -> String {
 }
 
 private func preciseTime(_ seconds: Double) -> String {
-    String(format: "%d:%04.1f", Int(max(0, seconds)) / 60, max(0, seconds).truncatingRemainder(dividingBy: 60))
+    String(format: "%d:%06.3f", Int(max(0, seconds)) / 60, max(0, seconds).truncatingRemainder(dividingBy: 60))
 }
