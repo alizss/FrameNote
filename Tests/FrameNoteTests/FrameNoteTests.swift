@@ -47,6 +47,20 @@ final class FrameNoteTests: XCTestCase {
         XCTAssertFalse(old.isVisible(at: 4))
     }
 
+    func testApprovalSurvivesExportAndLegacyNotesRemainOpen() throws {
+        var mark = ReviewMark(kind: .point, start: UnitPoint2D(x: 0.5, y: 0.5), note: "Spacing is correct")
+        let legacy = try JSONEncoder().encode(mark)
+        XCTAssertFalse(try JSONDecoder().decode(ReviewMark.self, from: legacy).isApproved)
+        mark.isApproved = true
+        let restored = try JSONDecoder().decode(ReviewMark.self, from: JSONEncoder().encode(mark))
+        XCTAssertTrue(restored.isApproved)
+        let manifest = ReviewManifest(createdAt: Date(), title: "Review", imageWidth: 80,
+                                      imageHeight: 50, referenceImageFile: nil, marks: [restored])
+        XCTAssertTrue(ReviewMarkdown.generate(manifest).contains("Approved — no change needed"))
+        mark.isApproved = false
+        XCTAssertFalse(mark.isApproved)
+    }
+
     func testPointsStayInsideCapturedImage() {
         XCTAssertEqual(UnitPoint2D(x: -2, y: 1.5), UnitPoint2D(x: 0, y: 1))
     }
@@ -74,5 +88,57 @@ final class FrameNoteTests: XCTestCase {
         decoder.dateDecodingStrategy = .iso8601
         XCTAssertEqual(try decoder.decode(ReviewManifest.self, from: json).marks, [mark])
         XCTAssertTrue(feedback.contains("Center this"))
+    }
+
+    @MainActor
+    func testExportKeepsInspirationWithItsComment() throws {
+        let image = NSImage(size: NSSize(width: 40, height: 30), flipped: false) { rect in
+            NSColor.white.setFill(); rect.fill(); return true
+        }
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let inspiration = parent.appendingPathComponent("example.png")
+        let cg = try XCTUnwrap(image.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        try XCTUnwrap(NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])).write(to: inspiration)
+        var mark = ReviewMark(kind: .focus, start: UnitPoint2D(x: 0.1, y: 0.1),
+                              end: UnitPoint2D(x: 0.8, y: 0.8), note: "Improve the opening motion")
+        mark.inspirations = [InspirationAttachment(kind: .url, value: "https://example.com/motion"),
+                             InspirationAttachment(kind: .image, value: inspiration.path)]
+        mark.designAnalysis = "Reduce the extra dismissal step."
+        let folder = try ReviewExporter.export(screenshot: image, reference: nil,
+                                               title: "Motion", marks: [mark], into: parent)
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let manifest = try decoder.decode(ReviewManifest.self,
+            from: Data(contentsOf: folder.appendingPathComponent("feedback.json")))
+        let exported = try XCTUnwrap(manifest.marks.first)
+        XCTAssertEqual(exported.inspirations?.first?.value, "https://example.com/motion")
+        let file = try XCTUnwrap(exported.inspirations?.last?.value)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent(file).path))
+        let feedback = try String(contentsOf: folder.appendingPathComponent("feedback.md"), encoding: .utf8)
+        XCTAssertTrue(feedback.contains(file))
+        XCTAssertTrue(feedback.contains("Reduce the extra dismissal step."))
+    }
+
+    func testChangingMarkTypeKeepsCommentAndGivesShapesGeometry() throws {
+        var mark = ReviewMark(kind: .point, start: UnitPoint2D(x: 0.5, y: 0.5), time: 2, endTime: 3, note: "Tighten this")
+        mark.convert(to: .focus)
+        XCTAssertEqual(mark.kind, .focus)
+        XCTAssertNotNil(mark.end)
+        XCTAssertEqual(mark.note, "Tighten this")
+        XCTAssertEqual(mark.time, 2)
+        XCTAssertEqual(mark.endTime, 3)
+
+        mark.convert(to: .arrow)
+        XCTAssertEqual(mark.kind, .arrow)
+        XCTAssertNotNil(mark.end)
+
+        mark.convert(to: .point)
+        XCTAssertEqual(mark.kind, .point)
+        XCTAssertNil(mark.end)
+        XCTAssertEqual(mark.start.x, 0.5, accuracy: 0.001)
+
+        mark.convert(to: .compareGaps)
+        XCTAssertEqual(mark.kind, .point, "Compare gaps needs two drawn gaps")
     }
 }

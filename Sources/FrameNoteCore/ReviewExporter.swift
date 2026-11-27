@@ -14,9 +14,8 @@ enum ExportError: LocalizedError {
     }
 }
 
-@MainActor
 public enum ReviewExporter {
-    public static func export(
+    @MainActor public static func export(
         screenshot: NSImage?,
         reference: NSImage?,
         title: String,
@@ -26,17 +25,24 @@ public enum ReviewExporter {
         loopEnd: Double? = nil,
         into parent: URL
     ) throws -> URL {
-        guard screenshot != nil || videoURL != nil else {
-            throw ExportError.unreadableImage
-        }
-        let screenshotImage = screenshot?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        try exportImages(ExportRequest(
+            screenshot: screenshot?.cgImage(forProposedRect: nil, context: nil, hints: nil),
+            reference: reference?.cgImage(forProposedRect: nil, context: nil, hints: nil),
+            title: title, marks: marks, videoURL: videoURL, loopStart: loopStart, loopEnd: loopEnd, parent: parent))
+    }
+
+    static func exportImages(_ request: ExportRequest, previewOnly: Bool = false) throws -> URL {
+        let screenshotImage = request.screenshot
+        let referenceImage = request.reference
+        let title = request.title, marks = request.marks, videoURL = request.videoURL
+        let loopStart = request.loopStart, loopEnd = request.loopEnd, parent = request.parent
+        guard screenshotImage != nil || videoURL != nil else { throw ExportError.unreadableImage }
         let videoGenerator = videoURL.map { AVAssetImageGenerator(asset: AVURLAsset(url: $0)) }
         videoGenerator?.appliesPreferredTrackTransform = true
+        if previewOnly { videoGenerator?.maximumSize = CGSize(width: 640, height: 640) }
+        videoGenerator?.requestedTimeToleranceBefore = .zero
+        videoGenerator?.requestedTimeToleranceAfter = .zero
         guard let source = screenshotImage ?? videoGenerator.flatMap({ try? $0.copyCGImage(at: .zero, actualTime: nil) }) else {
-            throw ExportError.unreadableImage
-        }
-        let referenceImage = reference?.cgImage(forProposedRect: nil, context: nil, hints: nil)
-        if reference != nil && referenceImage == nil {
             throw ExportError.unreadableImage
         }
         let formatter = DateFormatter()
@@ -44,7 +50,26 @@ public enum ReviewExporter {
         let folder = parent.appendingPathComponent("FrameNote-\(formatter.string(from: Date()))-\(UUID().uuidString.prefix(6))")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
 
-        let manifest = ReviewManifest(
+        var completed = false
+        defer { if !completed { try? FileManager.default.removeItem(at: folder) } }
+        try Task.checkCancellation()
+        var exportedMarks = marks
+        for markIndex in exportedMarks.indices {
+            for attachmentIndex in (exportedMarks[markIndex].inspirations ?? []).indices {
+                guard let attachment = exportedMarks[markIndex].inspirations?[attachmentIndex],
+                      attachment.kind != .url else { continue }
+                let sourceURL = URL(fileURLWithPath: attachment.value)
+                let filename = "inspiration-\(markIndex + 1)-\(attachmentIndex + 1).\(sourceURL.pathExtension.lowercased())"
+                try FileManager.default.copyItem(at: sourceURL, to: folder.appendingPathComponent(filename))
+                exportedMarks[markIndex].inspirations?[attachmentIndex].value = filename
+            }
+        }
+        for mark in marks {
+            for variant in mark.variants ?? [] {
+                try variant.html(note: mark.note).write(to: folder.appendingPathComponent(variant.filename), atomically: true, encoding: .utf8)
+            }
+        }
+        var manifest = ReviewManifest(
             createdAt: Date(),
             title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "UI feedback" : title,
             imageWidth: source.width,
@@ -53,11 +78,15 @@ public enum ReviewExporter {
             videoFile: videoURL?.lastPathComponent,
             loopStart: loopStart,
             loopEnd: loopEnd,
-            marks: marks
+            marks: exportedMarks
         )
         try pngData(for: source).write(to: folder.appendingPathComponent("screenshot.png"))
         let stillMarks = videoURL == nil ? marks : []
         try annotatedPNG(source: source, marks: stillMarks).write(to: folder.appendingPathComponent("annotated.png"))
+        if videoURL == nil, let wireframe = request.wireframe {
+            try annotatedPNG(source: source, marks: marks, overlay: wireframe).write(to: folder.appendingPathComponent("wireframe.png"))
+            manifest.wireframeImageFile = "wireframe.png"
+        }
         if videoURL == nil {
             for (index, mark) in marks.enumerated() where mark.kind == .focus {
                 try focusPNG(source: source, mark: mark).write(
@@ -65,11 +94,12 @@ public enum ReviewExporter {
                 )
             }
         }
-        if let videoURL {
+        if let videoURL, !previewOnly {
             let destination = folder.appendingPathComponent(videoURL.lastPathComponent)
             try FileManager.default.copyItem(at: videoURL, to: destination)
             guard let videoGenerator else { throw ExportError.unreadableImage }
             for (index, mark) in marks.enumerated() {
+                try Task.checkCancellation()
                 guard let time = mark.time,
                       let frame = try? videoGenerator.copyCGImage(
                         at: CMTime(seconds: time, preferredTimescale: 600), actualTime: nil
@@ -98,10 +128,11 @@ public enum ReviewExporter {
             atomically: true,
             encoding: .utf8
         )
+        completed = true
         return folder
     }
 
-    private static func pngData(for image: CGImage) throws -> Data {
+    static func pngData(for image: CGImage) throws -> Data {
         guard let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
             throw ExportError.imageEncodingFailed
         }
@@ -120,7 +151,7 @@ public enum ReviewExporter {
         return try pngData(for: cropped)
     }
 
-    private static func annotatedPNG(source: CGImage, marks: [ReviewMark], numberOffset: Int = 0) throws -> Data {
+    static func annotatedPNG(source: CGImage, marks: [ReviewMark], numberOffset: Int = 0, overlay: LayoutOverlay? = nil) throws -> Data {
         let width = source.width
         let height = source.height
         guard let bitmap = NSBitmapImageRep(
@@ -142,7 +173,8 @@ public enum ReviewExporter {
         NSImage(cgImage: source, size: NSSize(width: width, height: height))
             .draw(in: NSRect(x: 0, y: 0, width: width, height: height))
         let scale = max(1, min(CGFloat(width), CGFloat(height)) / 1000)
-        for (index, mark) in marks.enumerated() {
+        if let overlay { drawWireframe(overlay, width: width, height: height, scale: scale) }
+        for (index, mark) in marks.enumerated() where mark.wholeMedia != true {
             draw(mark, number: index + 1 + numberOffset, width: width, height: height, scale: scale)
         }
         context.flushGraphics()
@@ -151,6 +183,32 @@ public enum ReviewExporter {
             throw ExportError.imageEncodingFailed
         }
         return data
+    }
+
+    private static func drawWireframe(_ overlay: LayoutOverlay, width: Int, height: Int, scale: CGFloat) {
+        let purple = NSColor(red: 0.55, green: 0.25, blue: 0.95, alpha: 1)
+        for guide in overlay.guides {
+            let position = CGFloat(guide.position)
+            let (from, to) = guide.axis == .vertical
+                ? (NSPoint(x: position * CGFloat(width), y: 0), NSPoint(x: position * CGFloat(width), y: CGFloat(height)))
+                : (NSPoint(x: 0, y: (1 - position) * CGFloat(height)), NSPoint(x: CGFloat(width), y: (1 - position) * CGFloat(height)))
+            let path = NSBezierPath()
+            path.lineWidth = 0.75 * scale
+            path.move(to: from); path.line(to: to)
+            purple.withAlphaComponent(0.35).setStroke(); path.stroke()
+        }
+        for element in overlay.elements {
+            let rect = NSRect(x: element.rect.minX * CGFloat(width), y: (1 - element.rect.maxY) * CGFloat(height),
+                              width: element.rect.width * CGFloat(width), height: element.rect.height * CGFloat(height))
+            if element.kind == .container {
+                purple.withAlphaComponent(0.06).setFill()
+                NSBezierPath(rect: rect).fill()
+            }
+            let path = NSBezierPath(rect: rect)
+            path.lineWidth = (element.kind == .container ? 1.25 : 0.9) * scale
+            purple.withAlphaComponent(element.kind == .container ? 0.95 : 0.75).setStroke()
+            path.stroke()
+        }
     }
 
     private static func draw(_ mark: ReviewMark, number: Int, width: Int, height: Int, scale: CGFloat) {
@@ -209,13 +267,13 @@ public enum ReviewExporter {
         case .compareGaps:
             if let end {
                 line(from: start, to: end, color: .systemCyan, scale: scale)
-                drawLabel("A", at: NSPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 + 8 * scale), scale: scale, color: .systemCyan)
+                drawLabel("A · \(Int(mark.distanceInPixels(width: width, height: height)?.rounded() ?? 0)) px", at: NSPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 + 8 * scale), scale: scale, color: .systemCyan)
             }
             if let second = mark.secondStart, let secondEnd = mark.secondEnd {
                 let a = NSPoint(x: second.x * CGFloat(width), y: (1 - second.y) * CGFloat(height))
                 let b = NSPoint(x: secondEnd.x * CGFloat(width), y: (1 - secondEnd.y) * CGFloat(height))
                 line(from: a, to: b, color: .systemPurple, scale: scale)
-                drawLabel("B", at: NSPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 + 8 * scale), scale: scale, color: .systemPurple)
+                drawLabel("B · \(Int(mark.secondDistanceInPixels(width: width, height: height)?.rounded() ?? 0)) px", at: NSPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 + 8 * scale), scale: scale, color: .systemPurple)
                 badge(at: start, number: number, scale: scale, color: red)
             }
         }
